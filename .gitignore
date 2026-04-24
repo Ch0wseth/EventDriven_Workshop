@@ -1,0 +1,228 @@
+# ============================================
+# Workshop Event-Driven Azure - .gitignore
+# ============================================
+
+# ============================================
+# WEBSITE - FICHIERS COPIÉS
+# ============================================
+# Les fichiers Markdown sont copiés depuis docs/ vers website/static/docs/
+# On ignore la copie pour éviter la duplication dans Git
+website/static/docs/
+
+# ============================================
+# IDE & ÉDITEURS
+# ============================================
+# Visual Studio Code
+.vscode/
+!.vscode/settings.json.example
+!.vscode/extensions.json.example
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Eclipse
+.classpath
+.project
+.settings/
+bin/
+
+# NetBeans
+nbproject/
+nbbuild/
+dist/
+nbdist/
+
+# ============================================
+# JAVA
+# ============================================
+# Compiled class files
+*.class
+
+# Package files
+*.jar
+*.war
+*.ear
+*.nar
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.jar
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# ============================================
+# NODE.JS
+# ============================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Package managers
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ============================================
+# PYTHON
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+env/
+ENV/
+.venv
+
+# ============================================
+# ENVIRONNEMENT & SECRETS
+# ============================================
+.env
+.env.local
+.env.*.local
+*.local.properties
+application-local.yml
+application-local.properties
+secrets.yml
+secrets.json
+
+# ============================================
+# AZURE
+# ============================================
+# Azure CLI
+.azure/
+
+# Azure Functions
+local.settings.json
+__blobstorage__/
+__queuestorage__/
+__azurite_db*__.json
+
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
+
+# Bicep
+*.bicep.parameters.local.json
+
+# ============================================
+# SYSTÈME D'EXPLOITATION
+# ============================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+*~
+.directory
+.Trash-*
+
+# ============================================
+# LOGS & TEMPORAIRES
+# ============================================
+*.log
+*.log.*
+logs/
+log/
+*.tmp
+*.temp
+*.swp
+*.swo
+*.bak
+*.backup
+*.orig
+
+# ============================================
+# BUILD & DISTRIBUTION
+# ============================================
+# Static site builds
+website/build/
+website/dist/
+website/.next/
+website/.nuxt/
+website/.output/
+
+# Coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Test reports
+test-results/
+junit.xml
+
+# ============================================
+# DONNÉES SENSIBLES
+# ============================================
+# Connection strings
+connectionStrings.json
+
+# Certificats
+*.pfx
+*.p12
+*.key
+*.pem
+*.crt
+*.cer
+
+# ============================================
+# DIVERS
+# ============================================
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Fichiers de verrouillage
+*.lock
+!package-lock.json
+
+# Fichiers de cache
+.cache/
+.parcel-cache/
+.eslintcache
+
+# Documentation générée
+docs-build/
+_site/

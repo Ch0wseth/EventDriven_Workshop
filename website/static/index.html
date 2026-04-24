@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture Event-Driven sur Azure - Workshop</title>
+    <meta name="description" content="Workshop pratique sur l'architecture event-driven avec Azure Event Hubs et Event Grid">
+    
+    <!-- Styles -->
+    <link rel="stylesheet" href="css/style.css">
+    
+    <!-- Marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
+    <!-- Highlight.js for code syntax -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/java.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/bash.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/json.min.js"></script>
+    
+    <!-- Mermaid for diagrams -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo">⚡ Architecture Event-Driven sur Azure</h1>
+                <nav class="header-nav">
+                    <button id="darkModeToggle" class="btn-icon" title="Toggle Dark Mode">🌙</button>
+                    <a href="https://github.com/Ch0wseth/EventDriven_Workshop" target="_blank" class="btn-icon" title="GitHub">
+                        <svg width="24" height="24" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+                        </svg>
+                    </a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <div class="container-fluid">
+        <div class="layout">
+            <!-- Sidebar -->
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-content">
+                    <div class="sidebar-header">
+                        <h2>📚 Modules</h2>
+                        <div class="progress-container">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="progressBar"></div>
+                            </div>
+                            <span class="progress-text" id="progressText">0/8 modules</span>
+                        </div>
+                    </div>
+                    
+                    <nav class="sidebar-nav" id="moduleNav">
+                        <!-- Generated dynamically -->
+                    </nav>
+
+                    <div class="sidebar-footer">
+                        <a href="https://github.com/Ch0wseth/EventDriven_Workshop/blob/main/LICENSE" target="_blank" class="sidebar-link">
+                            📄 License CC BY 4.0
+                        </a>
+                    </div>
+                </div>
+            </aside>
+
+            <!-- Main Content -->
+            <main class="main-content" id="mainContent">
+                <div class="content-wrapper">
+                    <!-- Home Page -->
+                    <div id="homePage" class="home-page">
+                        <div class="hero">
+                            <h1 class="hero-title">Architecture Event-Driven sur Azure</h1>
+                            <p class="hero-subtitle">
+                                Workshop pratique : Maîtrisez Azure Event Hubs, Event Grid et construisez des systèmes événementiels scalables
+                            </p>
+                            <div class="hero-stats">
+                                <div class="stat">
+                                    <div class="stat-value">8</div>
+                                    <div class="stat-label">Modules</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-value">Intermédiaire</div>
+                                    <div class="stat-label">Niveau</div>
+                                </div>
+                                <div class="stat">
+                                    <div class="stat-value">Java</div>
+                                    <div class="stat-label">Langage</div>
+                                </div>
+                            </div>
+                            <div class="hero-actions">
+                                <button class="btn btn-primary" onclick="loadModule('00-introduction')">
+                                    🚀 Commencer le Workshop
+                                </button>
+                                <a href="https://github.com/Ch0wseth/EventDriven_Workshop" target="_blank" class="btn btn-secondary">
+                                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="margin-right: 8px;">
+                                        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+                                    </svg>
+                                    Voir sur GitHub
+                                </a>
+                            </div>
+                        </div>
+
+                        <div class="features">
+                            <div class="feature-card">
+                                <div class="feature-icon">⚡</div>
+                                <h3>Event Hubs</h3>
+                                <p>Streaming haute performance pour millions d'événements/seconde</p>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">🔔</div>
+                                <h3>Event Grid</h3>
+                                <p>Routage intelligent d'événements serverless</p>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">🤖</div>
+                                <h3>Foundry AI</h3>
+                                <p>Agents intelligents pour traitement événementiel</p>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">☕</div>
+                                <h3>100% Java</h3>
+                                <p>Exemples complets avec Maven et SDKs Azure</p>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">🛡️</div>
+                                <h3>Production-Ready</h3>
+                                <p>Sécurité, résilience, monitoring et best practices</p>
+                            </div>
+                            <div class="feature-card">
+                                <div class="feature-icon">🎯</div>
+                                <h3>Labs Pratiques</h3>
+                                <p>Hands-on avec déploiements Azure réels</p>
+                            </div>
+                        </div>
+
+                        <div class="prereqs">
+                            <h2>📋 Prérequis</h2>
+                            <ul>
+                                <li>Compte Azure actif (ou <a href="https://azure.microsoft.com/free/" target="_blank">compte gratuit</a>)</li>
+                                <li>Azure CLI installé</li>
+                                <li>Java 17+ et Maven 3.8+</li>
+                                <li>Visual Studio Code avec extensions Azure</li>
+                                <li>Connaissances de base en développement cloud</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <!-- Module Content (hidden by default) -->
+                    <div id="moduleContent" class="module-content" style="display: none;">
+                        <!-- Content loaded dynamically -->
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <p>© 2024 Event-Driven Workshop | License CC BY 4.0 | Made with ❤️ for the Azure Community</p>
+        </div>
+    </footer>
+
+    <!-- Scripts -->
+    <script src="js/app.js"></script>
+</body>
+</html>
