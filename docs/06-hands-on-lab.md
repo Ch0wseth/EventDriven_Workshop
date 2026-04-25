@@ -1,1001 +1,776 @@
-# Module 6 : Lab Final - Pipeline de Monitoring et Observabilité Temps Réel
+# Module 6 : Lab Final — Pipeline Event-Driven Complet
 
-> 📚 **Architecture inspirée de** : [Monitoring Observable Systems - Microsoft Learn](https://learn.microsoft.com/en-us/azure/architecture/example-scenario/monitoring/monitoring-observable-systems-media) (version sans Fabric)
+## 🎯 Objectifs
 
-## 🎯 Objectif
+Dans ce lab final, vous assemblez **toutes les briques** déployées en module 02 et codées en modules 03 et 04 :
 
-Construire un **système de monitoring temps réel** pour surveiller des applications et devices clients, en utilisant les **patterns event-driven et streaming** étudiés dans ce workshop.
+- Vérifier que l'infrastructure module 02 est opérationnelle
+- Implémenter l'ingesteur HTTP → Event Hubs (Function Java)
+- Configurer Stream Analytics pour l'agrégation fenêtrée
+- Câbler le change feed Cosmos DB → Event Grid (Function Java)
+- Déployer l'`EventGridHandler` et créer l'abonnement Event Grid
+- Valider le pipeline de bout en bout par injection de données
 
-**Use Case** : Monitoring d'une flotte de 1000+ devices IoT (capteurs industriels, véhicules connectés, ou players vidéo) générant de la télémétrie en temps réel.
+---
 
-## 🏗️ Architecture Globale
+## 🏗️ Vue d'Ensemble du Pipeline
 
 ```mermaid
-graph TB
-    subgraph "Sources de Télémétrie"
-        DEV[IoT Devices<br/>Players/Sensors]
-        APP[Applications<br/>& Services]
+flowchart LR
+    subgraph Sources
+        HTTP["🌐 HTTP Client\n(curl / Postman)"]
     end
-    
-    subgraph "Ingestion & Transformation"
-        DEV -->|HTTP POST| FUNC1[Azure Functions<br/>Parse & Validate]
-        APP -->|Telemetry| FUNC1
-        
-        FUNC1 -->|Stream| EH[Event Hubs<br/>telemetry-stream]
-        
-        EH -->|Capture| BLOB[Blob Storage<br/>Raw Telemetry Archive]
-        BLOB -->|Blob Created| EG[Event Grid<br/>blob-events]
-        EG -->|Trigger| FUNC2[Azure Functions<br/>Post-Process]
+
+    subgraph Ingest
+        FUNC1["⚡ EventIngestor\n(Function Java)"]
     end
-    
-    subgraph "Analytics & Storage"
-        EH -->|Real-time| SA[Stream Analytics<br/>Aggregations & Anomalies]
-        SA -->|Hot Metrics| COSM[Cosmos DB<br/>Real-time Metrics]
-        SA -->|Cold Analytics| ADX[Data Explorer<br/>Historical Analysis]
-        SA -->|Alerts| FUNC3[Azure Functions<br/>Alert Handler]
+
+    subgraph Streaming
+        EH["🚀 Event Hubs\nbusiness-events"]
+        CG1["📥 cg-app"]
+        CG2["📥 cg-analytics"]
     end
-    
-    subgraph "Observability"
-        COSM -->|API| DASH[Dashboard<br/>Real-Time View]
-        ADX -->|KQL| DASH
-        FUNC3 -->|Notify| TEAMS[Teams/Email<br/>Alerts]
-        
-        EH -.->|Metrics| AI[Application Insights<br/>Monitoring]
-        FUNC1 -.->|Traces| AI
-        FUNC2 -.->|Traces| AI
+
+    subgraph Aggregation
+        SA["🔧 Stream Analytics\nfenêtre 5 min"]
+        DB["🗄️ Cosmos DB\neda-db/events"]
     end
-    
+
+    subgraph Notification
+        CF["⚡ ChangeFeedToEventGrid\n(Function Java)"]
+        EG["🔀 Event Grid\negt-workshop-xxx"]
+        H["⚡ EventGridHandler\n(Function Java)"]
+    end
+
+    HTTP -->|"POST /api/events"| FUNC1
+    FUNC1 --> EH
+    EH --> CG1
+    EH --> CG2
+    CG2 --> SA
+    SA --> DB
+    DB -->|"change feed"| CF
+    CF --> EG
+    EG --> H
+
     style EH fill:#0078d4,color:#fff
+    style DB fill:#1e4d78,color:#fff
     style EG fill:#7FBA00,color:#fff
-    style SA fill:#7FBA00,color:#fff
-```
-
-*[Télécharger le diagramme Visio](./assets/monitoring-architecture.vsdx)*
-
-## 📋 Services Utilisés
-
-| Service | Rôle | Pattern |
-|---------|------|---------|
-| **Event Hubs** | Front door ingestion (millions events/sec) | Event Streaming |
-| **Event Hubs Capture** | Archive automatique vers Blob Storage | Lambda Architecture (Cold Path) |
-| **Blob Storage** | Stockage brut télémétrie (format Avro) | Data Lake |
-| **Event Grid** | Notification création blobs | Event Notification |
-| **Azure Functions** | Parsing, validation, alerting | Serverless Processing |
-| **Stream Analytics** | Aggregations temps réel & anomalies | Stream Processing |
-| **Cosmos DB** | Métriques temps réel (hot storage) | NoSQL Time-Series |
-| **Data Explorer (ADX)** | Analytics historiques (cold storage) | Time-Series Analytics |
-| **Application Insights** | Observabilité du pipeline | APM & Monitoring |
-
-## 🎓 Patterns Implémentés
-
-| Pattern | Implémentation | Module Référence |
-|---------|----------------|------------------|
-| **Event Streaming** | Event Hubs pour ingestion massive | Module 2 & 3 |
-| **Lambda Architecture** | Hot path (Stream Analytics) + Cold path (Capture + ADX) | Module 5 |
-| **Event Notification** | Event Grid sur Blob Storage | Module 4 |
-| **Stream Processing** | Stream Analytics avec fenêtres temporelles | Module 5 |
-| **Serverless Processing** | Azure Functions event-driven | Module 4 |
-| **Observability** | Application Insights + correlation IDs | Module 5 |
-
-## 🛠️ Étape 1 : Provisionner l'Infrastructure
-
-### Script de Déploiement Azure CLI
-
-```bash
-#!/bin/bash
-
-# Configuration
-RESOURCE_GROUP="rg-monitoring-eventdriven"
-LOCATION="francecentral"
-PROJECT_NAME="monitor$(openssl rand -hex 3)"
-
-echo "🚀 Déploiement du pipeline de monitoring temps réel"
-echo "   Resource Group: $RESOURCE_GROUP"
-echo "   Location: $LOCATION"
-echo "   Project Name: $PROJECT_NAME"
-echo ""
-
-# Créer le resource group
-echo "📦 Création du resource group..."
-az group create --name $RESOURCE_GROUP --location $LOCATION
-
-# 1. Event Hubs (Front Door)
-echo "📡 Création du Event Hubs namespace..."
-EH_NAMESPACE="${PROJECT_NAME}-eh"
-az eventhubs namespace create \
-  --name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --sku Standard \
-  --capacity 2
-
-# Créer le Event Hub pour la télémétrie
-az eventhubs eventhub create \
-  --name telemetry-stream \
-  --namespace-name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP \
-  --partition-count 8 \
-  --message-retention 3
-
-# Consumer groups
-az eventhubs eventhub consumer-group create \
-  --name stream-analytics \
-  --eventhub-name telemetry-stream \
-  --namespace-name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP
-
-az eventhubs eventhub consumer-group create \
-  --name monitoring-functions \
-  --eventhub-name telemetry-stream \
-  --namespace-name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP
-
-# 2. Blob Storage (pour Capture et archive)
-echo "💾 Création du Storage Account..."
-STORAGE_ACCOUNT="${PROJECT_NAME}storage"
-az storage account create \
-  --name $STORAGE_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --sku Standard_LRS \
-  --kind StorageV2
-
-# Créer le container pour Capture
-STORAGE_KEY=$(az storage account keys list \
-  --account-name $STORAGE_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --query "[0].value" -o tsv)
-
-az storage container create \
-  --name telemetry-capture \
-  --account-name $STORAGE_ACCOUNT \
-  --account-key $STORAGE_KEY
-
-# 3. Activer Event Hubs Capture
-echo "📦 Activation du Event Hubs Capture..."
-az eventhubs eventhub update \
-  --name telemetry-stream \
-  --namespace-name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP \
-  --enable-capture true \
-  --capture-interval 300 \
-  --capture-size-limit 314572800 \
-  --destination-name EventHubArchive.AzureBlockBlob \
-  --storage-account $STORAGE_ACCOUNT \
-  --blob-container telemetry-capture \
-  --archive-name-format '{Namespace}/{EventHub}/{PartitionId}/{Year}/{Month}/{Day}/{Hour}/{Minute}/{Second}'
-
-# 4. Event Grid System Topic (blob events)
-echo "⚡ Création du Event Grid System Topic..."
-EG_TOPIC="${PROJECT_NAME}-blob-events"
-az eventgrid system-topic create \
-  --name $EG_TOPIC \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --topic-type Microsoft.Storage.StorageAccounts \
-  --source $(az storage account show -n $STORAGE_ACCOUNT -g $RESOURCE_GROUP --query id -o tsv)
-
-# 5. Cosmos DB (Hot storage pour métriques temps réel)
-echo "🌍 Création de Cosmos DB..."
-COSMOS_ACCOUNT="${PROJECT_NAME}-cosmos"
-az cosmosdb create \
-  --name $COSMOS_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --locations regionName=$LOCATION \
-  --kind GlobalDocumentDB \
-  --default-consistency-level Session
-
-# Créer la database et container
-az cosmosdb sql database create \
-  --account-name $COSMOS_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --name MonitoringMetrics
-
-az cosmosdb sql container create \
-  --account-name $COSMOS_ACCOUNT \
-  --database-name MonitoringMetrics \
-  --resource-group $RESOURCE_GROUP \
-  --name DeviceMetrics \
-  --partition-key-path "/deviceId" \
-  --throughput 400
-
-# 6. Application Insights
-echo "📊 Création de Application Insights..."
-APPINSIGHTS_NAME="${PROJECT_NAME}-ai"
-az monitor app-insights component create \
-  --app $APPINSIGHTS_NAME \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --kind web
-
-APPINSIGHTS_KEY=$(az monitor app-insights component show \
-  --app $APPINSIGHTS_NAME \
-  --resource-group $RESOURCE_GROUP \
-  --query instrumentationKey -o tsv)
-
-# 7. Function App (pour parsing et alerting)
-echo "⚡ Création de la Function App..."
-FUNCTION_APP="${PROJECT_NAME}-functions"
-az functionapp create \
-  --name $FUNCTION_APP \
-  --resource-group $RESOURCE_GROUP \
-  --consumption-plan-location $LOCATION \
-  --runtime dotnet-isolated \
-  --runtime-version 8 \
-  --functions-version 4 \
-  --storage-account $STORAGE_ACCOUNT \
-  --app-insights $APPINSIGHTS_NAME
-
-# 8. Stream Analytics Job
-echo "🌊 Création du Stream Analytics Job..."
-SA_JOB="${PROJECT_NAME}-sa"
-az stream-analytics job create \
-  --name $SA_JOB \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --sku Standard
-
-echo ""
-echo "✅ Infrastructure déployée avec succès!"
-echo ""
-echo "📝 Informations de connexion :"
-echo "   Event Hubs Namespace: $EH_NAMESPACE"
-echo "   Storage Account: $STORAGE_ACCOUNT"
-echo "   Cosmos DB Account: $COSMOS_ACCOUNT"
-echo "   Function App: $FUNCTION_APP"
-echo "   Stream Analytics Job: $SA_JOB"
-echo "   Application Insights Key: $APPINSIGHTS_KEY"
-echo ""
-
-# Sauvegarder les connection strings
-echo "🔑 Récupération des connection strings..."
-EH_CONNECTION_STRING=$(az eventhubs namespace authorization-rule keys list \
-  --namespace-name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP \
-  --name RootManageSharedAccessKey \
-  --query primaryConnectionString -o tsv)
-
-COSMOS_CONNECTION_STRING=$(az cosmosdb keys list \
-  --name $COSMOS_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --type connection-strings \
-  --query "connectionStrings[0].connectionString" -o tsv)
-
-# Créer un fichier .env pour le développement local
-cat > .env << EOF
-RESOURCE_GROUP=$RESOURCE_GROUP
-EVENT_HUBS_NAMESPACE=$EH_NAMESPACE
-EVENT_HUBS_CONNECTION_STRING=$EH_CONNECTION_STRING
-STORAGE_ACCOUNT=$STORAGE_ACCOUNT
-STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=$STORAGE_ACCOUNT;AccountKey=$STORAGE_KEY;EndpointSuffix=core.windows.net
-COSMOS_ACCOUNT=$COSMOS_ACCOUNT
-COSMOS_CONNECTION_STRING=$COSMOS_CONNECTION_STRING
-APPINSIGHTS_INSTRUMENTATION_KEY=$APPINSIGHTS_KEY
-FUNCTION_APP=$FUNCTION_APP
-STREAM_ANALYTICS_JOB=$SA_JOB
-EOF
-
-echo "✅ Fichier .env créé avec les connection strings"
-  --name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --sku Standard
-
-az eventhubs eventhub create \
-  --name analytics-stream \
-  --namespace-name $EH_NAMESPACE \
-  --resource-group $RESOURCE_GROUP \
-  --partition-count 4
-
-# 4. Cosmos DB
-echo "🗄️  Création de Cosmos DB..."
-COSMOS_ACCOUNT="${PROJECT_NAME}-cosmos"
-az cosmosdb create \
-  --name $COSMOS_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --locations regionName=$LOCATION \
-  --default-consistency-level Session
-
-az cosmosdb sql database create \
-  --account-name $COSMOS_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --name EcommerceDB
-
-az cosmosdb sql container create \
-  --account-name $COSMOS_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --database-name EcommerceDB \
-  --name OrderReadModels \
-  --partition-key-path "/customerId"
-
-# 5. Azure SQL
-echo "💾 Création d'Azure SQL Database..."
-SQL_SERVER="${PROJECT_NAME}-sql"
-SQL_ADMIN="sqladmin"
-SQL_PASSWORD="P@ssw0rd$(openssl rand -hex 4)!"
-
-az sql server create \
-  --name $SQL_SERVER \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --admin-user $SQL_ADMIN \
-  --admin-password $SQL_PASSWORD
-
-# Autoriser les services Azure
-az sql server firewall-rule create \
-  --server $SQL_SERVER \
-  --resource-group $RESOURCE_GROUP \
-  --name AllowAzureServices \
-  --start-ip-address 0.0.0.0 \
-  --end-ip-address 0.0.0.0
-
-az sql db create \
-  --server $SQL_SERVER \
-  --resource-group $RESOURCE_GROUP \
-  --name OrdersDB \
-  --service-objective S0
-
-# 6. Storage Account pour Functions
-echo "📦 Création du Storage Account..."
-STORAGE_ACCOUNT="${PROJECT_NAME}st"
-az storage account create \
-  --name $STORAGE_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --sku Standard_LRS
-
-# 7. Function App
-echo "⚡ Création du Function App..."
-FUNCTION_APP="${PROJECT_NAME}-func"
-az functionapp create \
-  --name $FUNCTION_APP \
-  --resource-group $RESOURCE_GROUP \
-  --storage-account $STORAGE_ACCOUNT \
-  --runtime dotnet-isolated \
-  --runtime-version 8 \
-  --functions-version 4 \
-  --consumption-plan-location $LOCATION
-
-echo ""
-echo "✅ Infrastructure déployée avec succès !"
-echo ""
-echo "📝 Informations de connexion:"
-echo "   Service Bus: $SB_NAMESPACE"
-echo "   Event Grid: $EG_TOPIC"
-echo "   Event Hubs: $EH_NAMESPACE"
-echo "   Cosmos DB: $COSMOS_ACCOUNT"
-echo "   SQL Server: $SQL_SERVER"
-echo "   SQL Password: $SQL_PASSWORD"
-echo "   Function App: $FUNCTION_APP"
-echo ""
-
-# Générer le fichier .env
-cat > .env << EOF
-RESOURCE_GROUP=$RESOURCE_GROUP
-SERVICE_BUS_NAMESPACE=$SB_NAMESPACE
-EVENT_GRID_TOPIC=$EG_TOPIC
-EVENT_HUB_NAMESPACE=$EH_NAMESPACE
-COSMOS_ACCOUNT=$COSMOS_ACCOUNT
-SQL_SERVER=$SQL_SERVER
-SQL_DATABASE=OrdersDB
-SQL_USER=$SQL_ADMIN
-SQL_PASSWORD=$SQL_PASSWORD
-FUNCTION_APP=$FUNCTION_APP
-EOF
-
-echo "💾 Configuration sauvegardée dans .env"
-```
-
-Sauvegarder ce script dans `deploy-infrastructure.sh` et l'exécuter :
-
-```bash
-chmod +x deploy-infrastructure.sh
-./deploy-infrastructure.sh
+    style SA fill:#ff8c00,color:#fff
 ```
 
 ---
 
-## 💻 Étape 2 : Implémenter le Order Processing Service
+## 🔑 Variables — Récapitulatif Module 02
 
-### Créer le projet
+Reprenez votre session shell ou réexportez les variables :
 
 ```bash
-dotnet new console -n OrderProcessingService
-cd OrderProcessingService
+# ── Identifiants ─────────────────────────────────────────────
+export SUFFIX=<votre_suffix>          # même valeur qu'en module 02
+export RG="rg-eda-workshop"
+export LOCATION="francecentral"
 
-# Packages nécessaires
-dotnet add package Azure.Messaging.ServiceBus
-dotnet add package Azure.Messaging.EventGrid
-dotnet add package Microsoft.Data.SqlClient
-dotnet add package System.Text.Json
+# ── Event Hubs ───────────────────────────────────────────────
+export EH_NAMESPACE="evhns-workshop-$SUFFIX"
+export EH_NAME="business-events"
+export EH_CG_APP="cg-app"
+export EH_CG_SA="cg-analytics"
+
+# ── Storage ──────────────────────────────────────────────────
+export STORAGE_ACCOUNT="stworkshop$SUFFIX"
+export CHECKPOINT_CONTAINER="eh-checkpoints"
+
+# ── Function App ─────────────────────────────────────────────
+export FUNC_APP="func-ingest-$SUFFIX"
+
+# ── Cosmos DB ────────────────────────────────────────────────
+export COSMOS_ACCOUNT="cosmos-workshop-$SUFFIX"
+export COSMOS_DB="eda-db"
+export COSMOS_CONTAINER="events"
+
+# ── Stream Analytics ─────────────────────────────────────────
+export SA_JOB="sa-workshop-$SUFFIX"
+
+# ── Event Grid ───────────────────────────────────────────────
+export EG_TOPIC="egt-workshop-$SUFFIX"
+
+# ── Connection Strings ───────────────────────────────────────
+export EH_PRODUCER_CS=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE --resource-group $RG \
+  --name policy-producer --query primaryConnectionString --output tsv)
+
+export EH_CONSUMER_CS=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE --resource-group $RG \
+  --name policy-consumer --query primaryConnectionString --output tsv)
+
+export STORAGE_CS=$(az storage account show-connection-string \
+  --name $STORAGE_ACCOUNT --resource-group $RG --query connectionString --output tsv)
+
+export EG_ENDPOINT=$(az eventgrid topic show \
+  --name $EG_TOPIC --resource-group $RG --query endpoint --output tsv)
+
+export EG_KEY=$(az eventgrid topic key list \
+  --name $EG_TOPIC --resource-group $RG --query key1 --output tsv)
+
+export COSMOS_CS=$(az cosmosdb keys list \
+  --name $COSMOS_ACCOUNT --resource-group $RG \
+  --type connection-strings \
+  --query "connectionStrings[0].connectionString" --output tsv)
+
+echo "✅ Variables chargées"
 ```
 
-### Code Principal
+---
 
-#### `Models.cs`
+## ① Vérification de l'Infrastructure
 
-```csharp
-using System.Text.Json.Serialization;
+Avant de coder, vérifiez que chaque ressource module 02 est bien provisionnée :
 
-namespace OrderProcessingService;
+```bash
+echo "=== Event Hubs ==="
+az eventhubs eventhub show \
+  --name $EH_NAME \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --query "{name:name, partitions:partitionCount}" --output table
 
-public record OrderCommand(
-    string OrderId,
-    string CustomerId,
-    List<OrderItem> Items,
-    decimal TotalAmount,
-    DateTime Timestamp
-);
+echo "=== Consumer Groups ==="
+az eventhubs eventhub consumer-group list \
+  --eventhub-name $EH_NAME \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --query "[].name" --output table
 
-public record OrderItem(
-    string ProductId,
-    string ProductName,
-    int Quantity,
-    decimal Price
-);
+echo "=== Cosmos DB ==="
+az cosmosdb sql container show \
+  --account-name $COSMOS_ACCOUNT --resource-group $RG \
+  --database-name $COSMOS_DB --name $COSMOS_CONTAINER \
+  --query "{container:id, partitionKey:partitionKey.paths}" --output table
 
-public record OrderEntity
-{
-    public string OrderId { get; set; }
-    public string CustomerId { get; set; }
-    public decimal TotalAmount { get; set; }
-    public string ItemsJson { get; set; }
-    public string Status { get; set; }
-    public DateTime CreatedAt { get; set; }
-}
+echo "=== Event Grid Topic ==="
+az eventgrid topic show \
+  --name $EG_TOPIC --resource-group $RG \
+  --query "{name:name, endpoint:endpoint, state:provisioningState}" --output table
 
-public record OrderCreatedEvent(
-    string OrderId,
-    string CustomerId,
-    decimal TotalAmount,
-    int ItemCount,
-    DateTime Timestamp
-);
+echo "=== Function App ==="
+az functionapp show \
+  --name $FUNC_APP --resource-group $RG \
+  --query "{name:name, state:state}" --output table
+
+echo "=== Stream Analytics ==="
+az stream-analytics job show \
+  --name $SA_JOB --resource-group $RG \
+  --query "{name:name, state:jobState}" --output table
 ```
 
-#### `OrderProcessor.cs`
+> Toutes les ressources doivent apparaître. Si une est manquante, revenez au module 02 pour la provisionner.
 
-```csharp
-using Azure.Messaging.ServiceBus;
-using Azure.Messaging.EventGrid;
-using Azure;
-using Microsoft.Data.SqlClient;
-using System.Text.Json;
+---
 
-namespace OrderProcessingService;
+## ② Maven — Projet Functions Unifié
 
-public class OrderProcessor
-{
-    private readonly string _serviceBusConnectionString;
-    private readonly string _sqlConnectionString;
-    private readonly EventGridPublisherClient _eventGridClient;
+Les trois Functions du pipeline sont dans un seul projet Maven déployé sur `$FUNC_APP`.
 
-    public OrderProcessor(
-        string serviceBusConnectionString,
-        string sqlConnectionString,
-        string eventGridTopicEndpoint,
-        string eventGridTopicKey)
-    {
-        _serviceBusConnectionString = serviceBusConnectionString;
-        _sqlConnectionString = sqlConnectionString;
-        _eventGridClient = new EventGridPublisherClient(
-            new Uri(eventGridTopicEndpoint),
-            new AzureKeyCredential(eventGridTopicKey)
-        );
-    }
+### Structure du projet
 
-    public async Task StartAsync()
-    {
-        await using var client = new ServiceBusClient(_serviceBusConnectionString);
-        await using var processor = client.CreateProcessor("order-commands");
+```
+eda-functions/
+├── pom.xml
+└── src/main/java/com/example/eda/
+    ├── EventIngestor.java          ← HTTP → Event Hubs
+    ├── ChangeFeedToEventGrid.java  ← Cosmos DB change feed → Event Grid
+    └── EventGridHandler.java       ← Event Grid → action
+```
 
-        processor.ProcessMessageAsync += ProcessOrderAsync;
-        processor.ProcessErrorAsync += ErrorHandler;
+### `pom.xml`
 
-        Console.WriteLine("📥 Order Processor démarré. En attente de commandes...\n");
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+           http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
 
-        await processor.StartProcessingAsync();
-        
-        Console.WriteLine("Appuyez sur Entrée pour arrêter...");
-        Console.ReadLine();
-        
-        await processor.StopProcessingAsync();
-    }
+  <groupId>com.example</groupId>
+  <artifactId>eda-functions</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
 
-    private async Task ProcessOrderAsync(ProcessMessageEventArgs args)
-    {
-        var body = args.Message.Body.ToString();
-        var orderCommand = JsonSerializer.Deserialize<OrderCommand>(body);
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.source>21</maven.compiler.source>
+    <maven.compiler.target>21</maven.compiler.target>
+    <azure.functions.maven.plugin.version>1.36.0</azure.functions.maven.plugin.version>
+    <azure.functions.java.library.version>3.1.0</azure.functions.java.library.version>
+  </properties>
 
-        Console.WriteLine($"📦 Traitement de la commande: {orderCommand.OrderId}");
+  <dependencies>
+    <!-- Azure Functions runtime -->
+    <dependency>
+      <groupId>com.microsoft.azure.functions</groupId>
+      <artifactId>azure-functions-java-library</artifactId>
+      <version>${azure.functions.java.library.version}</version>
+    </dependency>
 
-        try
-        {
-            // 1. Valider la commande
-            if (orderCommand.TotalAmount <= 0)
-                throw new InvalidOperationException("Montant invalide");
+    <!-- Event Hubs -->
+    <dependency>
+      <groupId>com.azure</groupId>
+      <artifactId>azure-messaging-eventhubs</artifactId>
+      <version>5.18.0</version>
+    </dependency>
 
-            // 2. Sauvegarder dans SQL (Write Model)
-            await SaveOrderToDatabase(orderCommand);
-            Console.WriteLine($"   ✅ Sauvegardée dans la base de données");
+    <!-- Event Grid -->
+    <dependency>
+      <groupId>com.azure</groupId>
+      <artifactId>azure-messaging-eventgrid</artifactId>
+      <version>4.21.0</version>
+    </dependency>
 
-            // 3. Publier l'événement OrderCreated vers Event Grid
-            await PublishOrderCreatedEvent(orderCommand);
-            Console.WriteLine($"   ✅ Événement publié vers Event Grid");
+    <!-- Jackson -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.17.0</version>
+    </dependency>
+  </dependencies>
 
-            // 4. Compléter le message
-            await args.CompleteMessageAsync(args.Message);
-            Console.WriteLine($"   ✅ Commande {orderCommand.OrderId} traitée avec succès\n");
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>com.microsoft.azure</groupId>
+        <artifactId>azure-functions-maven-plugin</artifactId>
+        <version>${azure.functions.maven.plugin.version}</version>
+        <configuration>
+          <appName>${env.FUNC_APP}</appName>
+          <resourceGroup>${env.RG}</resourceGroup>
+          <region>${env.LOCATION}</region>
+          <runtime>
+            <os>linux</os>
+            <javaVersion>21</javaVersion>
+          </runtime>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
+```
+
+### `EventIngestor.java` — HTTP → Event Hubs
+
+```java
+package com.example.eda;
+
+import com.azure.messaging.eventhubs.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.microsoft.azure.functions.*;
+import com.microsoft.azure.functions.annotation.*;
+
+import java.util.Map;
+import java.util.Optional;
+
+public class EventIngestor {
+
+    private static final String EH_PRODUCER_CS = System.getenv("EH_PRODUCER_CS");
+    private static final String EH_NAME        = "business-events";
+    private static final ObjectMapper MAPPER   = new ObjectMapper();
+
+    private static final EventHubProducerClient PRODUCER =
+        new EventHubClientBuilder()
+            .connectionString(EH_PRODUCER_CS, EH_NAME)
+            .buildProducerClient();
+
+    @FunctionName("EventIngestor")
+    public HttpResponseMessage run(
+        @HttpTrigger(
+            name = "req",
+            methods = { HttpMethod.POST },
+            authLevel = AuthorizationLevel.FUNCTION,
+            route = "events"
+        ) HttpRequestMessage<Optional<String>> request,
+        final ExecutionContext context
+    ) {
+        String body = request.getBody().orElse("{}");
+
+        try {
+            Map<?, ?> payload = MAPPER.readValue(body, Map.class);
+
+            EventDataBatch batch = PRODUCER.createBatch();
+            batch.tryAdd(new EventData(body));
+            PRODUCER.send(batch);
+
+            context.getLogger().info("📨 Événement ingéré : " + payload.get("type"));
+
+            return request.createResponseBuilder(HttpStatus.ACCEPTED)
+                .body(Map.of("status", "accepted"))
+                .build();
+
+        } catch (Exception e) {
+            context.getLogger().severe("❌ Erreur ingestion : " + e.getMessage());
+            return request.createResponseBuilder(HttpStatus.BAD_REQUEST)
+                .body(Map.of("error", e.getMessage()))
+                .build();
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"   ❌ Erreur: {ex.Message}");
-            
-            // Retry ou dead-letter
-            if (args.Message.DeliveryCount >= 3)
-            {
-                await args.DeadLetterMessageAsync(args.Message);
-                Console.WriteLine($"   ⚰️  Commande envoyée en dead-letter\n");
-            }
-            else
-            {
-                await args.AbandonMessageAsync(args.Message);
-            }
-        }
-    }
-
-    private async Task SaveOrderToDatabase(OrderCommand order)
-    {
-        using var connection = new SqlConnection(_sqlConnectionString);
-        await connection.OpenAsync();
-
-        var sql = @"
-            INSERT INTO Orders (OrderId, CustomerId, TotalAmount, ItemsJson, Status, CreatedAt)
-            VALUES (@OrderId, @CustomerId, @TotalAmount, @ItemsJson, @Status, @CreatedAt)
-        ";
-
-        using var command = new SqlCommand(sql, connection);
-        command.Parameters.AddWithValue("@OrderId", order.OrderId);
-        command.Parameters.AddWithValue("@CustomerId", order.CustomerId);
-        command.Parameters.AddWithValue("@TotalAmount", order.TotalAmount);
-        command.Parameters.AddWithValue("@ItemsJson", JsonSerializer.Serialize(order.Items));
-        command.Parameters.AddWithValue("@Status", "Pending");
-        command.Parameters.AddWithValue("@CreatedAt", order.Timestamp);
-
-        await command.ExecuteNonQueryAsync();
-    }
-
-    private async Task PublishOrderCreatedEvent(OrderCommand order)
-    {
-        var evt = new EventGridEvent(
-            subject: $"orders/{order.OrderId}",
-            eventType: "Ecommerce.OrderCreated",
-            dataVersion: "1.0",
-            data: new OrderCreatedEvent(
-                order.OrderId,
-                order.CustomerId,
-                order.TotalAmount,
-                order.Items.Count,
-                order.Timestamp
-            )
-        );
-
-        await _eventGridClient.SendEventAsync(evt);
-    }
-
-    private Task ErrorHandler(ProcessErrorEventArgs args)
-    {
-        Console.WriteLine($"❌ Erreur: {args.Exception.Message}");
-        return Task.CompletedTask;
     }
 }
 ```
 
-#### `Program.cs`
+---
 
-```csharp
-using OrderProcessingService;
+## ③ Stream Analytics — Agrégation en Fenêtre
 
-// Configuration (depuis variables d'environnement ou .env)
-var serviceBusConnectionString = Environment.GetEnvironmentVariable("SERVICE_BUS_CONNECTION_STRING");
-var sqlConnectionString = Environment.GetEnvironmentVariable("SQL_CONNECTION_STRING");
-var eventGridTopicEndpoint = Environment.GetEnvironmentVariable("EVENT_GRID_TOPIC_ENDPOINT");
-var eventGridTopicKey = Environment.GetEnvironmentVariable("EVENT_GRID_TOPIC_KEY");
+Stream Analytics consomme `cg-analytics` et agrège les événements par fenêtre de 5 minutes avant d'écrire dans Cosmos DB.
 
-// Créer et démarrer le processor
-var processor = new OrderProcessor(
-    serviceBusConnectionString,
-    sqlConnectionString,
-    eventGridTopicEndpoint,
-    eventGridTopicKey
-);
+### Configurer l'entrée Event Hubs
 
-await processor.StartAsync();
+```bash
+EH_CONSUMER_KEY=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --name policy-consumer \
+  --query primaryKey --output tsv)
+
+az stream-analytics input create \
+  --job-name $SA_JOB \
+  --resource-group $RG \
+  --name "eh-input" \
+  --properties "{
+    \"type\": \"Stream\",
+    \"datasource\": {
+      \"type\": \"Microsoft.EventHub/EventHub\",
+      \"properties\": {
+        \"eventHubName\": \"$EH_NAME\",
+        \"serviceBusNamespace\": \"$EH_NAMESPACE\",
+        \"consumerGroupName\": \"$EH_CG_SA\",
+        \"sharedAccessPolicyName\": \"policy-consumer\",
+        \"sharedAccessPolicyKey\": \"$EH_CONSUMER_KEY\"
+      }
+    },
+    \"serialization\": { \"type\": \"Json\", \"properties\": { \"encoding\": \"UTF8\" } }
+  }"
+
+echo "✅ Entrée SA configurée : $EH_NAME / $EH_CG_SA"
 ```
 
-### Créer la table SQL
+### Configurer la sortie Cosmos DB
+
+```bash
+COSMOS_KEY=$(az cosmosdb keys list \
+  --name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --query primaryMasterKey --output tsv)
+
+az stream-analytics output create \
+  --job-name $SA_JOB \
+  --resource-group $RG \
+  --name "cosmos-output" \
+  --properties "{
+    \"datasource\": {
+      \"type\": \"Microsoft.Storage/DocumentDB\",
+      \"properties\": {
+        \"accountId\": \"$COSMOS_ACCOUNT\",
+        \"accountKey\": \"$COSMOS_KEY\",
+        \"database\": \"$COSMOS_DB\",
+        \"collectionNamePattern\": \"$COSMOS_CONTAINER\",
+        \"partitionKey\": \"type\",
+        \"documentId\": \"id\"
+      }
+    }
+  }"
+
+echo "✅ Sortie Cosmos DB configurée : $COSMOS_DB/$COSMOS_CONTAINER"
+```
+
+### Requête SAQL — Fenêtre Bascule (Tumbling) 5 min
 
 ```sql
-CREATE TABLE Orders (
-    OrderId NVARCHAR(50) PRIMARY KEY,
-    CustomerId NVARCHAR(50) NOT NULL,
-    TotalAmount DECIMAL(18, 2) NOT NULL,
-    ItemsJson NVARCHAR(MAX) NOT NULL,
-    Status NVARCHAR(20) NOT NULL,
-    CreatedAt DATETIME2 NOT NULL
-);
+SELECT
+    System.Timestamp()          AS windowEnd,
+    type,
+    COUNT(*)                    AS eventCount,
+    AVG(CAST(value AS float))   AS avgValue,
+    MIN(CAST(value AS float))   AS minValue,
+    MAX(CAST(value AS float))   AS maxValue,
+    NEWID()                     AS id
+INTO
+    [cosmos-output]
+FROM
+    [eh-input] PARTITION BY PartitionId
+GROUP BY
+    type,
+    TumblingWindow(minute, 5)
+```
 
-CREATE INDEX IX_Orders_CustomerId ON Orders(CustomerId);
-CREATE INDEX IX_Orders_CreatedAt ON Orders(CreatedAt DESC);
+> Collez cette requête dans l'éditeur de requête Stream Analytics (portail Azure → votre job SA → Requête).
+
+### Démarrer le job
+
+```bash
+az stream-analytics job start \
+  --name $SA_JOB \
+  --resource-group $RG \
+  --output-start-mode JobStartTime
+
+echo "✅ Stream Analytics démarré"
+
+az stream-analytics job show \
+  --name $SA_JOB --resource-group $RG \
+  --query "{state:jobState, lastOutput:lastOutputEventTime}" --output table
 ```
 
 ---
 
-## ⚡ Étape 3 : Créer les Azure Functions (Event Handlers)
+## ④ ChangeFeedToEventGrid — Function Java
 
-### Initialiser le projet Functions
+Cette Function est déclenchée automatiquement à chaque écriture de Stream Analytics dans Cosmos DB. Elle publie l'agrégat dans Event Grid.
 
-```bash
-func init EcommerceFunctions --worker-runtime dotnet-isolated
-cd EcommerceFunctions
+### `ChangeFeedToEventGrid.java`
 
-# Packages
-dotnet add package Azure.Messaging.EventHubs
-dotnet add package Microsoft.Azure.Cosmos
-```
+```java
+package com.example.eda;
 
-### Function 1 : Inventory Service
+import com.azure.core.credential.AzureKeyCredential;
+import com.azure.core.util.BinaryData;
+import com.azure.messaging.eventgrid.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.microsoft.azure.functions.*;
+import com.microsoft.azure.functions.annotation.*;
 
-```csharp
-using Microsoft.Azure.Functions.Worker;
-using Microsoft.Extensions.Logging;
-using Azure.Messaging;
-using System.Text.Json;
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
-namespace EcommerceFunctions;
+public class ChangeFeedToEventGrid {
 
-public class InventoryService
-{
-    private readonly ILogger<InventoryService> _logger;
+    private static final String EG_ENDPOINT  = System.getenv("EG_ENDPOINT");
+    private static final String EG_KEY       = System.getenv("EG_KEY");
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    public InventoryService(ILogger<InventoryService> logger)
-    {
-        _logger = logger;
-    }
+    private static final EventGridPublisherClient<EventGridEvent> EG_CLIENT =
+        new EventGridPublisherClientBuilder()
+            .endpoint(EG_ENDPOINT)
+            .credential(new AzureKeyCredential(EG_KEY))
+            .buildEventGridEventPublisherClient();
 
-    [Function("InventoryService")]
-    public void Run(
-        [EventGridTrigger] CloudEvent cloudEvent)
-    {
-        if (cloudEvent.Type == "Ecommerce.OrderCreated")
-        {
-            var data = JsonSerializer.Deserialize<JsonElement>(cloudEvent.Data.ToString());
-            var orderId = data.GetProperty("OrderId").GetString();
-            var itemCount = data.GetProperty("ItemCount").GetInt32();
+    @FunctionName("ChangeFeedToEventGrid")
+    public void run(
+        @CosmosDBTrigger(
+            name          = "documents",
+            databaseName  = "eda-db",
+            containerName = "events",
+            connection    = "COSMOS_CS",
+            createLeaseContainerIfNotExists = true
+        )
+        List<String> documents,
+        final ExecutionContext context
+    ) {
+        context.getLogger().info(
+            String.format("🔔 Change feed : %d document(s)", documents.size())
+        );
 
-            _logger.LogInformation($"📦 Inventory: Réservation pour commande {orderId} ({itemCount} items)");
-            
-            // TODO: Logique de réservation réelle
-            // - Vérifier disponibilité
-            // - Réserver le stock
-            // - Publier InventoryReserved event
-            
-            _logger.LogInformation($"✅ Inventory réservé pour {orderId}");
+        for (String raw : documents) {
+            try {
+                Map<?, ?> aggregate = MAPPER.readValue(raw, Map.class);
+
+                String type      = (String) aggregate.get("type");
+                String entityId  = aggregate.getOrDefault("id", UUID.randomUUID()).toString();
+                int    count     = aggregate.get("eventCount") != null
+                    ? ((Number) aggregate.get("eventCount")).intValue() : 0;
+                String windowEnd = aggregate.get("windowEnd") != null
+                    ? aggregate.get("windowEnd").toString()
+                    : OffsetDateTime.now().toString();
+
+                Map<String, Object> data = Map.of(
+                    "type",       type,
+                    "entityId",   entityId,
+                    "eventCount", count,
+                    "windowEnd",  windowEnd
+                );
+
+                EventGridEvent event = new EventGridEvent(
+                    "aggregates/" + type + "/" + entityId,
+                    "EDA.Aggregate.Created",
+                    BinaryData.fromObject(data),
+                    "1.0"
+                );
+                event.setId(UUID.randomUUID().toString());
+                event.setEventTime(OffsetDateTime.now());
+
+                EG_CLIENT.sendEvents(List.of(event));
+                context.getLogger().info(
+                    "📤 Publié → Event Grid : " + type + " (count=" + count + ")"
+                );
+
+            } catch (Exception e) {
+                // Ne pas lever l'exception pour traiter les autres documents du batch
+                context.getLogger().severe("❌ Erreur publication : " + e.getMessage());
+            }
         }
     }
 }
 ```
 
-### Function 2 : Payment Service
+---
 
-```csharp
-[Function("PaymentService")]
-public void Run(
-    [EventGridTrigger] CloudEvent cloudEvent)
-{
-    if (cloudEvent.Type == "Ecommerce.OrderCreated")
-    {
-        var data = JsonSerializer.Deserialize<JsonElement>(cloudEvent.Data.ToString());
-        var orderId = data.GetProperty("OrderId").GetString();
-        var totalAmount = data.GetProperty("TotalAmount").GetDecimal();
+## ⑤ EventGridHandler — Handler et Abonnement
 
-        _logger.LogInformation($"💳 Payment: Traitement de {totalAmount}€ pour {orderId}");
-        
-        // TODO: Intégration avec payment gateway
-        // - Stripe, PayPal, etc.
-        // - Publier PaymentProcessed event
-        
-        _logger.LogInformation($"✅ Paiement traité pour {orderId}");
+### `EventGridHandler.java`
+
+```java
+package com.example.eda;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.microsoft.azure.functions.*;
+import com.microsoft.azure.functions.annotation.*;
+
+import java.util.Map;
+import java.util.logging.Logger;
+
+public class EventGridHandler {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @FunctionName("EventGridHandler")
+    public void run(
+        @EventGridTrigger(name = "event") String eventGridEvent,
+        final ExecutionContext context
+    ) {
+        Logger log = context.getLogger();
+
+        try {
+            Map<?, ?> envelope = MAPPER.readValue(eventGridEvent, Map.class);
+
+            String eventType = (String) envelope.get("eventType");
+            String subject   = (String) envelope.get("subject");
+            String eventId   = (String) envelope.get("id");
+            Map<?, ?> data   = (Map<?, ?>) envelope.get("data");
+
+            log.info(String.format("📨 Event Grid reçu [%s] : %s", eventType, subject));
+
+            // Idempotence : Event Grid peut livrer le même événement deux fois.
+            // En production : vérifiez si eventId a déjà été traité (Cosmos DB, Redis…)
+
+            switch (eventType) {
+                case "EDA.Aggregate.Created" -> handleAggregate(data, log);
+                default -> log.info("ℹ️ Type non géré : " + eventType);
+            }
+
+            log.info("✅ Traité : " + eventId);
+
+        } catch (Exception ex) {
+            log.severe("❌ Erreur handler : " + ex.getMessage());
+            throw new RuntimeException(ex); // Event Grid retentera automatiquement
+        }
+    }
+
+    private void handleAggregate(Map<?, ?> data, Logger log) {
+        String type     = (String) data.get("type");
+        String entityId = (String) data.get("entityId");
+        int    count    = ((Number) data.get("eventCount")).intValue();
+
+        log.info(String.format(
+            "📊 Agrégat — type: %s | entity: %s | count: %d",
+            type, entityId, count
+        ));
+
+        // Ici : dashboard update, push notification, webhook Teams, etc.
     }
 }
 ```
 
-### Function 3 : Notification Service
-
-```csharp
-[Function("NotificationService")]
-public void Run(
-    [EventGridTrigger] CloudEvent cloudEvent)
-{
-    if (cloudEvent.Type == "Ecommerce.OrderCreated")
-    {
-        var data = JsonSerializer.Deserialize<JsonElement>(cloudEvent.Data.ToString());
-        var orderId = data.GetProperty("OrderId").GetString();
-        var customerId = data.GetProperty("CustomerId").GetString();
-
-        _logger.LogInformation($"📧 Notification: Envoi email pour commande {orderId}");
-        
-        // TODO: Envoyer l'email/SMS
-        // - Azure Communication Services
-        // - SendGrid, Twilio, etc.
-        
-        _logger.LogInformation($"✅ Notification envoyée pour {orderId}");
-    }
-}
-```
-
-### Function 4 : Analytics Projection (Event Hubs → Cosmos DB)
-
-```csharp
-using Microsoft.Azure.Functions.Worker;
-using Azure.Messaging.EventHubs;
-using Microsoft.Azure.Cosmos;
-
-[Function("AnalyticsProjection")]
-public async Task Run(
-    [EventHubTrigger("analytics-stream", Connection = "EventHubConnection")] EventData[] events,
-    FunctionContext context)
-{
-    var cosmosClient = new CosmosClient(Environment.GetEnvironmentVariable("COSMOS_CONNECTION_STRING"));
-    var container = cosmosClient.GetContainer("EcommerceDB", "OrderReadModels");
-
-    foreach (var evt in events)
-    {
-        var body = evt.EventBody.ToString();
-        var data = JsonSerializer.Deserialize<JsonElement>(body);
-
-        // Mise à jour du read model dans Cosmos DB
-        var customerId = data.GetProperty("CustomerId").GetString();
-        
-        // TODO: Mettre à jour le read model agrégé
-        // - Total orders per customer
-        // - Total spent
-        // - Recent orders list
-        
-        _logger.LogInformation($"📊 Read model mis à jour pour client {customerId}");
-    }
-}
-```
-
----
-
-## 📤 Étape 4 : Créer un Producteur de Commandes (API)
-
-### API simple en .NET Minimal API
-
-```csharp
-using Azure.Messaging.ServiceBus;
-using System.Text.Json;
-
-var builder = WebApplication.CreateBuilder(args);
-
-// Configuration Service Bus
-var serviceBusConnectionString = builder.Configuration["SERVICE_BUS_CONNECTION_STRING"];
-var serviceBusClient = new ServiceBusClient(serviceBusConnectionString);
-var sender = serviceBusClient.CreateSender("order-commands");
-
-builder.Services.AddSingleton(sender);
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
-var app = builder.Build();
-
-app.UseSwagger();
-app.UseSwaggerUI();
-
-// Endpoint pour créer une commande
-app.MapPost("/api/orders", async (CreateOrderRequest request, ServiceBusSender sender) =>
-{
-    var orderId = $"ORD-{Guid.NewGuid().ToString()[..8]}";
-    
-    var orderCommand = new
-    {
-        OrderId = orderId,
-        CustomerId = request.CustomerId,
-        Items = request.Items,
-        TotalAmount = request.Items.Sum(i => i.Quantity * i.Price),
-        Timestamp = DateTime.UtcNow
-    };
-
-    var message = new ServiceBusMessage(JsonSerializer.Serialize(orderCommand));
-    await sender.SendMessageAsync(message);
-
-    return Results.Accepted($"/api/orders/{orderId}", new { OrderId = orderId, Status = "Processing" });
-});
-
-app.Run();
-
-public record CreateOrderRequest(
-    string CustomerId,
-    List<OrderItem> Items
-);
-
-public record OrderItem(
-    string ProductId,
-    string ProductName,
-    int Quantity,
-    decimal Price
-);
-```
-
----
-
-## 🧪 Étape 5 : Tester le Workflow Complet
-
-### 1. Démarrer le Order Processing Service
+### Déployer les Functions
 
 ```bash
-cd OrderProcessingService
-dotnet run
+cd eda-functions
+
+# Déployer sur $FUNC_APP (package inclus automatiquement)
+mvn azure-functions:deploy
+
+echo "✅ Functions déployées sur $FUNC_APP"
+
+# Vérifier que les 3 fonctions sont présentes
+az functionapp function list \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --query "[].{name:name}" --output table
 ```
 
-### 2. Déployer les Azure Functions
+### Configurer les App Settings
 
 ```bash
-cd EcommerceFunctions
-func azure functionapp publish $FUNCTION_APP
-```
-
-### 3. Envoyer une commande via l'API
-
-```bash
-curl -X POST http://localhost:5000/api/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "customerId": "CUST-001",
-    "items": [
-      {
-        "productId": "PROD-123",
-        "productName": "Laptop",
-        "quantity": 1,
-        "price": 999.99
-      },
-      {
-        "productId": "PROD-456",
-        "productName": "Mouse",
-        "quantity": 2,
-        "price": 29.99
-      }
-    ]
-  }'
-```
-
-### 4. Observer le flux
-
-```
-1. API → Service Bus Queue ✅
-2. Order Processor consomme ✅
-3. Sauvegarde dans SQL ✅
-4. Publish vers Event Grid ✅
-5. Inventory Function triggered ✅
-6. Payment Function triggered ✅
-7. Notification Function triggered ✅
-8. Analytics vers Event Hubs ✅
-9. Projection vers Cosmos DB ✅
-```
-
----
-
-## 📊 Étape 6 : Monitoring et Observabilité
-
-### Application Insights
-
-```bash
-# Créer Application Insights
-APP_INSIGHTS="${PROJECT_NAME}-insights"
-
-az monitor app-insights component create \
-  --app $APP_INSIGHTS \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION
-
-# Connecter la Function App
-INSTRUMENTATION_KEY=$(az monitor app-insights component show \
-  --app $APP_INSIGHTS \
-  --resource-group $RESOURCE_GROUP \
-  --query instrumentationKey -o tsv)
-
 az functionapp config appsettings set \
-  --name $FUNCTION_APP \
-  --resource-group $RESOURCE_GROUP \
-  --settings APPINSIGHTS_INSTRUMENTATIONKEY=$INSTRUMENTATION_KEY
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --settings \
+    "EH_PRODUCER_CS=$EH_PRODUCER_CS" \
+    "EG_ENDPOINT=$EG_ENDPOINT" \
+    "EG_KEY=$EG_KEY" \
+    "COSMOS_CS=$COSMOS_CS"
+
+echo "✅ App Settings configurés"
 ```
 
-### Queries KQL utiles
+### Créer l'abonnement Event Grid → EventGridHandler
+
+```bash
+FUNC_ID=$(az functionapp function show \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --function-name EventGridHandler \
+  --query id --output tsv)
+
+az eventgrid event-subscription create \
+  --name "egs-notification" \
+  --source-resource-id $(az eventgrid topic show \
+    --name $EG_TOPIC --resource-group $RG --query id --output tsv) \
+  --endpoint-type azurefunction \
+  --endpoint $FUNC_ID \
+  --included-event-types "EDA.Aggregate.Created"
+
+echo "✅ Abonnement créé : egs-notification → EventGridHandler"
+```
+
+---
+
+## ⑥ Test de Bout en Bout
+
+### Récupérer l'URL de l'ingesteur
+
+```bash
+INGESTOR_URL=$(az functionapp function show \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --function-name EventIngestor \
+  --query invokeUrlTemplate --output tsv)
+
+INGESTOR_KEY=$(az functionapp keys list \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --query functionKeys.default --output tsv)
+
+echo "URL : $INGESTOR_URL"
+```
+
+### Injecter des événements de test
+
+```bash
+# 10 événements OrderPlaced
+for i in $(seq 1 10); do
+  curl -s -X POST "${INGESTOR_URL}?code=${INGESTOR_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"type\": \"OrderPlaced\",
+      \"entityId\": \"order-$(printf '%03d' $i)\",
+      \"value\": $((RANDOM % 500 + 50)),
+      \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+    }"
+  echo " ← order-$(printf '%03d' $i)"
+done
+
+# 5 événements PaymentFailed
+for i in $(seq 1 5); do
+  curl -s -X POST "${INGESTOR_URL}?code=${INGESTOR_KEY}" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"type\": \"PaymentFailed\",
+      \"entityId\": \"order-$(printf '%03d' $((i + 100)))\",
+      \"value\": $((RANDOM % 200 + 100)),
+      \"timestamp\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"
+    }"
+  echo " ← payment-failed-$(printf '%03d' $i)"
+done
+
+echo "✅ 15 événements injectés"
+```
+
+### Vérifier chaque étape
+
+```bash
+# 1️⃣ Event Hubs — messages entrants
+az monitor metrics list \
+  --resource $(az eventhubs eventhub show \
+    --name $EH_NAME --namespace-name $EH_NAMESPACE \
+    --resource-group $RG --query id --output tsv) \
+  --metric "IncomingMessages,OutgoingMessages" \
+  --interval PT1M --output table
+
+# 2️⃣ Stream Analytics — état et dernière sortie
+az stream-analytics job show \
+  --name $SA_JOB --resource-group $RG \
+  --query "{state:jobState, lastOutput:lastOutputEventTime}" --output table
+
+# 3️⃣ Event Grid — livraisons (après ~5 min, le temps que SA ferme sa fenêtre)
+az monitor metrics list \
+  --resource $(az eventgrid topic show \
+    --name $EG_TOPIC --resource-group $RG --query id --output tsv) \
+  --metric "PublishSuccessCount,DeliverySuccessCount,DeliveryFailCount" \
+  --interval PT5M --output table
+
+# 4️⃣ Function App — logs en temps réel
+func azure functionapp logstream $FUNC_APP
+```
+
+### Flux attendu
+
+```
+1. curl POST /api/events        → EventIngestor reçoit ✅
+2. EventIngestor → EH           → IncomingMessages > 0 ✅
+3. EH (cg-analytics) → SA       → jobState = Running ✅
+4. SA (fenêtre 5 min) → Cosmos  → document écrit ✅
+5. Cosmos change feed → CFTEG   → "📤 Publié → Event Grid" dans les logs ✅
+6. EG → EventGridHandler        → "📊 Agrégat reçu" dans les logs ✅
+```
+
+---
+
+## ⑦ Monitoring du Pipeline
+
+### Métriques clés par composant
+
+| Composant | Métrique | Seuil OK |
+|-----------|----------|----------|
+| Event Hubs | `IncomingMessages` | > 0 après injection |
+| Stream Analytics | `jobState` | `Running` |
+| Stream Analytics | `OutputEvents` | > 0 après 5 min |
+| Event Grid | `DeliverySuccessCount` | > 0 |
+| Event Grid | `DeliveryFailCount` | = 0 |
+| Function App | logs `✅ Traité` | Présent |
+
+### Requêtes KQL
 
 ```kql
-// Vue d'ensemble des événements
+// Événements ingérés par EventIngestor
 traces
-| where timestamp > ago(1h)
-| summarize count() by operation_Name
-| render barchart
+| where message startswith "📨"
+| summarize count() by bin(timestamp, 1m)
+| render timechart title="Événements ingérés / min"
+```
 
-// Latence par service
-requests
-| summarize avg(duration), percentile(duration, 95) by cloud_RoleName
-| render timechart
+```kql
+// Livraisons Event Grid
+AzureMetrics
+| where ResourceProvider == "MICROSOFT.EVENTGRID"
+| where MetricName in ("PublishSuccessCount", "DeliverySuccessCount", "DeliveryFailCount")
+| summarize Total = sum(Total) by MetricName, bin(TimeGenerated, 5m)
+| render timechart title="Event Grid — livraisons"
+```
 
-// Erreurs
+```kql
+// Erreurs dans les Functions
 exceptions
 | where timestamp > ago(1h)
 | project timestamp, operation_Name, problemId, outerMessage
+| order by timestamp desc
 ```
 
 ---
 
-## 🧹 Nettoyage
+## ➡️ Prochaine Étape
 
-```bash
-az group delete --name $RESOURCE_GROUP --yes --no-wait
-```
+Le pipeline event-driven est complet et validé de bout en bout. Dans le module suivant, on explore comment **intégrer des agents IA** (Microsoft Foundry) pour enrichir ce pipeline avec de l'intelligence contextuelle en temps réel.
 
----
-
-## 🎓 Ce que vous avez appris
-
-✅ **Architecture complète event-driven**
-- Queue-based load leveling (Service Bus)
-- Pub/Sub avec Event Grid
-- Streaming avec Event Hubs
-
-✅ **CQRS en pratique**
-- Write model (SQL)
-- Read model (Cosmos DB)
-- Projections asynchrones
-
-✅ **Patterns implémentés**
-- Command/Event separation
-- Event-driven choreography
-- Eventual consistency
-
-✅ **Scalabilité et résilience**
-- Services découplés
-- Dead-letter queues
-- Retry automatique
-
-## 🚀 Améliorations Possibles
-
-Pour aller plus loin, vous pourriez :
-
-1. **Implémenter Event Sourcing**
-   - Stocker tous les événements de commande
-   - Rebuild des aggregates depuis l'historique
-
-2. **Ajouter un Saga Orchestrator**
-   - Utiliser Durable Functions
-   - Gérer les compensations
-
-3. **Améliorer l'observabilité**
-   - Distributed tracing avec correlation IDs
-   - Dashboards personnalisés
-
-4. **Sécuriser**
-   - Managed Identity partout
-   - Azure Key Vault pour les secrets
-   - Private Endpoints
-
-5. **Optimiser les coûts**
-   - Auto-scaling intelligent
-   - Reserved capacity
-   - Archiving des données anciennes
-
----
-
-## 🎉 Félicitations !
-
-Vous avez terminé le workshop sur l'architecture event-driven dans Azure ! 🎓
-
-Vous êtes maintenant capable de concevoir et implémenter des systèmes event-driven robustes, scalables et résilients sur Microsoft Azure.
+**[Module 7 : Foundry Agents + Event-Driven →](./07-foundry-event-driven.md)**
 
 ---
 
