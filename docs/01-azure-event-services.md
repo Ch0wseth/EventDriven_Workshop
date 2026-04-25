@@ -78,290 +78,73 @@ flowchart TD
 
 ---
 
-## 🌐 Azure Event-Driven : Focus Streaming
+### 🔍 Pourquoi c'est une architecture Event-Driven
 
-Ce workshop se concentre sur les **services de streaming et d'événements** Azure :
+Cette architecture repose sur **quatre principes fondamentaux** de l'EDA :
 
-```mermaid
-graph TB
-    subgraph "Focus de ce Workshop"
-        EH[Azure Event Hubs<br/>Big Data Streaming<br/>⭐ FOCUS PRINCIPAL]
-        EG[Azure Event Grid<br/>Serverless Event Routing<br/>✨ Intégration Légère]
-    end
-    
-    subgraph "Streaming Avancé"
-        SA[Stream Analytics]
-        KA[Kafka Compatible]
-        CAP[Event Hubs Capture]
-    end
-    
-    EH --> SA
-    EH --> KA
-    EH --> CAP
-    
-    style EH fill:#0078d4,color:#fff,stroke-width:4px
-    style EG fill:#7FBA00,color:#fff
-```
+#### 1. Les producteurs ne connaissent pas les consommateurs
 
-## 📊 Comparaison des Services
+Un service backend publie ses événements dans Event Hubs **sans savoir** qui les lit. Aujourd'hui une app consommatrice et Stream Analytics. Demain on peut brancher un troisième Consumer Group (ML, audit log, replay...) **sans toucher au producteur**. C'est le découplage fort.
 
-| Critère | Event Hubs | Event Grid |
-|---------|------------|------------|
-| **Type** | Streaming | Event Routing |
-| **Débit** | ⭐⭐⭐⭐⭐ Millions/sec | ⭐⭐⭐⭐ Millions d'events |
-| **Taille message** | 1 MB (256 KB batch) | 1 MB |
-| **Rétention** | 1-90 jours | 24 heures |
-| **Protocole** | AMQP, Kafka, HTTPS | HTTP/HTTPS |
-| **Ordre garanti** | ✅ Par partition | ❌ Non |
-| **Use Case** | Streaming, événements métier, logs | Réactions, notifications, webhooks |
-| **Prix** | 💰💰💰 | 💰 |
-| **Replay** | ✅ Oui (rétention) | ❌ Non |
+> En architecture traditionnelle, le service backend appellerait directement l'app consommatrice et le pipeline analytique — deux appels synchrones, deux dépendances, deux points de panne.
 
-## 🔵 Azure Event Hubs - Le Cœur du Workshop
+#### 2. Le stream est une source de vérité persistante
 
-### Qu'est-ce que c'est ?
+Event Hubs conserve tous les événements pendant la durée de rétention configurée. Si un consommateur plante, il reprend là où il s'était arrêté. Si on déploie un nouveau service, il peut rejouer le passé. **Les données ne sont pas perdues entre producteur et consommateur** — c'est fondamentalement différent d'une API REST.
 
-**Event Hubs** est la **plateforme de streaming big data** d'Azure, capable de recevoir et traiter des millions d'événements par seconde avec une latence faible.
-
-### Caractéristiques Clés
-
-- 📈 **Haute performance** : Millions d'événements/seconde
-- 🔄 **Compatible Kafka** : Endpoint Kafka natif, migration facile
-- 📦 **Partitionnement** : Distribution automatique de la charge
-- 💾 **Rétention configurable** : 1 à 90 jours (tier Premium/Dedicated)
-- 🔌 **Capture automatique** : Vers Blob Storage ou Data Lake (Parquet/Avro)
-- 🌍 **Geo-replication** : Disaster recovery
-- ⚖️ **Auto-inflate** : Scaling automatique des throughput units
-
-### Cas d'Usage Event Hubs
+#### 3. Les Consumer Groups permettent la lecture parallèle et indépendante
 
 ```
-✅ Événements métier à haute fréquence (commandes, transactions, interactions)
-✅ Logs d'applications à grande échelle
-✅ Analytics en temps réel (Stream Analytics)
-✅ Clickstream d'un site web
-✅ Ingestion de données pour ML/AI
-✅ Surveillance et monitoring distribué
-✅ Migration depuis Apache Kafka
-✅ Time-series data (données de marché financier)
+Event Hubs
+    │
+    ├── Consumer Group A → App Consommatrice  (lecture temps réel, offset propre)
+    └── Consumer Group B → Stream Analytics   (lecture agrégation, offset propre)
 ```
 
-### Exemple de Flux Event Hubs
+Chaque groupe maintient sa propre position de lecture (**offset**). Le Group A peut être en retard sur le Group B — aucun n'impacte l'autre. C'est le pattern **Competing Consumers** appliqué à du streaming.
+
+#### 4. La réactivité est découplée du traitement principal
+
+Stream Analytics écrit dans Cosmos DB. Cosmos DB émet un **change feed** (événement). Event Grid reçoit cet événement et notifie les systèmes concernés.
+
+Ni Event Hubs, ni Stream Analytics, ni Cosmos DB ne savent qu'un système de notification existe. Le système de notification peut être ajouté, retiré, remplacé **sans modifier une seule ligne du pipeline principal**. C'est le pattern **Event Notification** de Martin Fowler.
+
+---
+
+### 🎭 Scénario concret : une transaction e-commerce
+
+Pour rendre l'architecture tangible, voici comment elle se comporte sur un événement réel :
 
 ```
-[Applications] ──> [Event Hubs] ──> [Stream Analytics] ──> [Power BI]
-   100K/sec       Partitions x16      Aggregation          Dashboard
-                  Retention 7j         Windowing          Real-time
-                                      Filtering
+1. [Client mobile] passe une commande
+       │
+       ▼
+2. [Azure Function] reçoit l'appel HTTP, valide et normalise
+   → publie { "type": "OrderPlaced", "orderId": "xyz", "amount": 149.90, "ts": "..." }
+       │
+       ▼
+3. [Event Hubs] stocke l'événement sur la partition hash("xyz")
+       │
+       ├── Consumer Group A → [App Consommatrice]
+       │       → met à jour le dashboard des ventes en temps réel
+       │
+       └── Consumer Group B → [Stream Analytics]
+               → agrège les ventes par heure
+               → détecte si le volume dépasse un seuil
+               → écrit l'agrégat dans Cosmos DB
+                       │
+                       ▼
+               [Cosmos DB change feed]
+                       │
+                       ▼
+               [Event Grid] route l'événement
+                       ├── [Function] → envoie un email de confirmation au client
+                       └── [Webhook] → notifie le système ERP legacy
 ```
 
-### Quand utiliser Event Hubs ?
+**Ce qui ne se passe pas :** la Function d'ingestion n'appelle jamais l'ERP. Le dashboard ne bloque pas si l'ERP est down. L'ERP peut être remplacé sans toucher au pipeline.
 
-- ✅ Besoin de très haut débit (> 1K msgs/sec)
-- ✅ Streaming de données en temps réel
-- ✅ Rétention pour replay et analytics
-- ✅ Compatible Kafka souhaité
-- ✅ Événements métier et logs à grande échelle
-- ✅ Time-series data
-- ✅ Traitement de flux (windowing, aggregation)
-
-### Quand ne PAS utiliser Event Hubs ?
-
-- ❌ Besoin de transactions ACID
-- ❌ Messages < 100/sec (over-engineering)
-- ❌ Ordre strict requis entre TOUS les messages (utiliser partition key)
-- ❌ Besoin de dead-letter queue sophistiquée
-- ❌ Budget très limité pour faible volume
-
-
-## 🟣 Azure Event Grid - Intégration Légère
-
-### Qu'est-ce que c'est ?
-
-**Event Grid** est un service de **routage d'événements serverless** pour construire des applications réactives basées sur les événements Azure ou custom.
-
-### Caractéristiques Clés
-
-- ⚡ **Serverless & Pay-per-event** : Pas de provisioning
-- 🔌 **100+ Sources natives** : Blob Storage, SQL Database, Resource Groups, etc.
-- 🎯 **Filtrage avancé** : Route les événements selon des règles
-- 🔄 **Retry automatique** : Avec backoff exponentiel (24h max)
-- 📊 **Très bas coût** : $0.60 par million d'opérations
-- 🌐 **Push model** : Déclenche des actions immédiatement
-
-### Architecture Event Grid
-
-```
-[Event Sources] ──> [Event Grid] ──> [Event Handlers]
-                         │
-                    [Filter Rules]
-                    [Routing Logic]
-```
-
-### Sources d'Événements Natives Azure
-
-- 📦 **Azure Blob Storage** : Fichier créé/supprimé
-- 🖥️ **Azure Resource Manager** : VM créée, RG supprimé
-- 🔑 **Azure Key Vault** : Secret expire
-- 📊 **Azure Resources** : Resource state changed
-- 🗃️ **Custom Topics** : Vos propres événements applicatifs
-- 🔐 **Azure AD** : User created
-- 📊 **Azure Monitor** : Alerts
-
-### Destinations (Handlers)
-
-- ⚡ Azure Functions
-- 🔗 Logic Apps
-- 🌐 Webhooks
-- 🚀 Event Hubs (bridging)
-
-### Cas d'Usage Event Grid
-
-```
-✅ Réaction aux événements Azure (blob uploadé, VM créée)
-✅ Notifications en temps réel légères
-✅ Serverless event-driven apps
-✅ Intégration entre services Azure
-✅ Webhooks pour applications externes
-✅ Automation et orchestration simple
-```
-
-### Exemple de Flux Event Grid
-
-```
-[User uploads image] ──> [Blob Storage] ──> [Event Grid]
-                                                  │
-                                                  ├──> [Function: Resize]
-                                                  ├──> [Function: OCR]
-                                                  └──> [Webhook: Notify Admin]
-```
-
-### Quand utiliser Event Grid ?
-
-- ✅ Réaction à des événements Azure natifs
-- ✅ Architecture serverless avec peu de logique métier
-- ✅ Notifications simples et webhooks
-- ✅ Budget très limité
-- ✅ Pas besoin de rétention
-- ✅ Intégration rapide entre services
-
-### Quand ne PAS utiliser Event Grid ?
-
-- ❌ Besoin de rétention > 24h
-- ❌ Volume très élevé nécessitant replay
-- ❌ Ordre strict requis
-- ❌ Traitement batch complexe
-- ❌ Need for consumer groups et partitionnement
-
-## 🤔 Event Hubs vs Event Grid : Comment Choisir ?
-
-### Arbre de Décision
-
-```mermaid
-graph TD
-    A[Besoin Event-Driven] --> B{Type de flux?}
-    B -->|Streaming continu<br/>haute perf| C[Event Hubs]
-    B -->|Événements ponctuels<br/>réactions| D[Event Grid]
-    
-    C --> E{Volume?}
-    E -->|> 1K/sec| F[Event Hubs ✅]
-    E -->|< 1K/sec| G[Event Grid possible]
-    
-    D --> H{Rétention?}
-    H -->|Besoin replay| I[Event Hubs ✅]
-    H -->|Pas de replay| J[Event Grid ✅]
-    
-    style F fill:#0078d4,color:#fff
-    style I fill:#0078d4,color:#fff
-    style J fill:#7FBA00,color:#fff
-```
-
-### Guide Rapide de Décision
-
-| Critère | Event Hubs | Event Grid |
-|---------|:----------:|:----------:|
-| **Débit > 1K/sec** | ✅ | ⚠️ |
-| **Streaming continu** | ✅ | ❌ |
-| **Rétention > 24h** | ✅ | ❌ |
-| **Replay événements** | ✅ | ❌ |
-| **Ordre garanti** | ✅ (partition) | ❌ |
-| **Kafka compatibility** | ✅ | ❌ |
-| **Serverless total** | ❌ | ✅ |
-| **Budget limité** | ❌ | ✅ |
-| **Intégration Azure native** | ⚠️ | ✅ |
-| **Traitement temps réel** | ✅ | ⚠️ |
-
-### Cas d'Usage par Service
-
-| Si vous avez besoin de... | Utilisez... |
-|---------------------------|-------------|
-| 🚀 Millions d'événements/sec | **Event Hubs** |
-| 📊 Streaming analytics en temps réel | **Event Hubs + Stream Analytics** |
-| 📈 Rétention longue (> 1 jour) | **Event Hubs** |
-| 🔄 Replay d'événements | **Event Hubs** |
-| ⚡ Réagir à un upload Blob Storage | **Event Grid** |
-| 🔔 Notifications légères | **Event Grid** |
-| 💰 Très petit budget | **Event Grid** |
-| 🎯 Webhook simple | **Event Grid** |
-| 📊 Événements métier haute fréquence | **Event Hubs** |
-| 🔌 Migration Kafka | **Event Hubs** |
-
-## 🔗 Utilisation Combinée
-
-Event Hubs et Event Grid peuvent être complémentaires !
-
-### Exemple : Pipeline Event-Driven Complet
-
-```
-[Applications] ──> [Event Hubs] ──> [Stream Analytics] ──> [Cosmos DB]
-                      │                                        │
-                      │                                        │
-                 [Anomaly detected]                      [Critical data]
-                      │                                        │
-                      ▼                                        ▼
-                [Event Grid] ──> [Alert Function]       [Event Grid]
-                                                              │
-                                                              ▼
-                                                      [Notification]
-```
-
-- **Event Hubs** : Flux principal d'événements métier
-- **Event Grid** : Alertes et notifications ponctuelles
-
-## ✅ Quiz
-
-1. **Vous devez ingérer les logs de 10,000 serveurs en temps réel. Quel service ?**
-   <details>
-   <summary>Réponse</summary>
-   <strong>Event Hubs</strong> - Conçu pour le streaming haute performance avec millions d'événements/seconde.
-   </details>
-
-2. **Vous voulez déclencher une Azure Function quand un fichier est uploadé dans Blob Storage. Quel service ?**
-   <details>
-   <summary>Réponse</summary>
-   <strong>Event Grid</strong> - Intégration native avec Blob Storage et serverless.
-   </details>
-
-3. **Vous devez conserver 30 jours d'événements pour analytics. Quel service ?**
-   <details>
-   <summary>Réponse</summary>
-   <strong>Event Hubs</strong> - Rétention jusqu'à 90 jours (Premium/Dedicated).
-   </details>
-
-4. **Budget limité, 100 événements/jour pour notifications. Quel service ?**
-   <details>
-   <summary>Réponse</summary>
-   <strong>Event Grid</strong> - Modèle pay-per-event, très économique pour faibles volumes.
-   </details>
-
-## 📚 Ressources
-
-- 📘 **[Event-Driven Architecture Style](https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/event-driven)** - Guide Microsoft officiel
-- 📘 **[Choisir entre les services de messagerie Azure](https://learn.microsoft.com/en-us/azure/event-grid/compare-messaging-services)** - Comparatif officiel
-- 📘 **[Azure Event Hubs Documentation](https://docs.microsoft.com/azure/event-hubs/)**
-- 📘 **[Azure Event Grid Documentation](https://docs.microsoft.com/azure/event-grid/)**
-- 📘 **[Azure Stream Analytics Documentation](https://learn.microsoft.com/en-us/azure/stream-analytics/)**
-- 📘 **[Azure Cosmos DB Free Tier](https://learn.microsoft.com/en-us/azure/cosmos-db/free-tier)**
+---
 
 ## ➡️ Prochaine Étape
 
