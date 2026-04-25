@@ -127,6 +127,19 @@ async function loadModule(moduleId) {
         
         // Render mermaid diagrams
         renderMermaidDiagrams();
+
+        // Intercept internal .md links to load modules via the SPA
+        document.querySelectorAll('#moduleContent a[href]').forEach(a => {
+            const href = a.getAttribute('href');
+            if (href && href.endsWith('.md') && !href.startsWith('http')) {
+                const filename = href.split('/').pop().replace('.md', '');
+                const target = modules.find(m => m.id === filename);
+                if (target) {
+                    a.href = `#${target.id}`;
+                    a.onclick = (e) => { e.preventDefault(); loadModule(target.id); };
+                }
+            }
+        });
         
         // Scroll to top
         window.scrollTo(0, 0);
