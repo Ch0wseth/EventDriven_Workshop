@@ -93,17 +93,17 @@ flowchart TD
 Ce module utilise le topic Event Grid déployé dans le **module 02**. Récupérez les variables :
 
 ```bash
-# Topic custom créé dans le module 02
-export EG_TOPIC_NAME="egt-workshop-$SUFFIX"
+# Topic custom créé dans le module 02 — EG_TOPIC est déjà défini si vous reprenez la session
+export EG_TOPIC="egt-workshop-$SUFFIX"
 
 export EG_ENDPOINT=$(az eventgrid topic show \
-  --name $EG_TOPIC_NAME \
+  --name $EG_TOPIC \
   --resource-group $RG \
   --query endpoint \
   --output tsv)
 
 export EG_KEY=$(az eventgrid topic key list \
-  --name $EG_TOPIC_NAME \
+  --name $EG_TOPIC \
   --resource-group $RG \
   --query key1 \
   --output tsv)
@@ -122,7 +122,7 @@ Le topic existe déjà (module 02). On ajoute maintenant des abonnements **spéc
 
 ```mermaid
 graph LR
-    T["$EG_TOPIC\necht-workshop-xxx"]
+    T["$EG_TOPIC\negt-workshop-xxx"]
 
     T -->|"eventType = EDA.Aggregate.*"| S1["sub-all-aggregates\n→ Function logging"]
     T -->|"eventType = EDA.Alert.*"| S2["sub-alerts\n→ Function notification"]
@@ -132,6 +132,8 @@ graph LR
 ```
 
 ### Créer un abonnement — Function Azure
+
+> ⚠️ La Function `EventGridHandler` est implémentée en section ③. Déployez-la d'abord (`func azure functionapp publish $FUNC_APP`) avant d'exécuter le bloc suivant.
 
 ```bash
 # Récupérer l'ID de la Function App déployée en module 02
@@ -146,7 +148,7 @@ FUNC_ID=$(az functionapp function show \
 az eventgrid event-subscription create \
   --name "sub-all-aggregates" \
   --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC_NAME \
+    --name $EG_TOPIC \
     --resource-group $RG \
     --query id --output tsv) \
   --endpoint-type azurefunction \
@@ -165,7 +167,7 @@ WEBHOOK_URL="https://webhook.site/votre-id-unique"
 az eventgrid event-subscription create \
   --name "sub-external" \
   --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC_NAME \
+    --name $EG_TOPIC \
     --resource-group $RG \
     --query id --output tsv) \
   --endpoint-type webhook \
@@ -182,7 +184,7 @@ echo "✅ Abonnement créé : sub-external → Webhook (alertes paiement)"
 az eventgrid event-subscription create \
   --name "sub-orders-only" \
   --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC_NAME \
+    --name $EG_TOPIC \
     --resource-group $RG \
     --query id --output tsv) \
   --endpoint-type webhook \
@@ -225,8 +227,8 @@ Dans l'architecture, c'est la **Function connectée au change feed** qui publie 
 package com.example.eda;
 
 import com.azure.core.credential.AzureKeyCredential;
+import com.azure.core.util.BinaryData;
 import com.azure.messaging.eventgrid.*;
-import com.azure.messaging.eventgrid.models.EventGridEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.time.OffsetDateTime;
@@ -327,10 +329,24 @@ public class CosmosChangeFeedPublisher {
 ### Publier en batch (plusieurs agrégats)
 
 ```java
+import com.azure.core.credential.AzureKeyCredential;
+import com.azure.core.util.BinaryData;
+import com.azure.messaging.eventgrid.*;
+
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class BatchPublisher {
+
+    private final EventGridPublisherClient<EventGridEvent> client;
+
+    public BatchPublisher() {
+        this.client = new EventGridPublisherClientBuilder()
+            .endpoint(System.getenv("EG_ENDPOINT"))
+            .credential(new AzureKeyCredential(System.getenv("EG_KEY")))
+            .buildEventGridEventPublisherClient();
+    }
 
     public void publishBatch(List<Map<String, Object>> aggregates) {
         List<EventGridEvent> events = new ArrayList<>();
@@ -465,7 +481,7 @@ private void handleAggregate(Map<?, ?> data, String eventId, Logger log) {
 ```bash
 # Publier directement dans le topic (test sans Cosmos DB)
 az eventgrid event publish \
-  --topic-name $EG_TOPIC_NAME \
+  --topic-name $EG_TOPIC \
   --resource-group $RG \
   --events '[{
     "id":          "test-001",
@@ -490,7 +506,7 @@ echo "✅ Événement publié"
 # Métriques du topic : événements publiés / livrés / échoués
 az monitor metrics list \
   --resource $(az eventgrid topic show \
-    --name $EG_TOPIC_NAME \
+    --name $EG_TOPIC \
     --resource-group $RG \
     --query id --output tsv) \
   --metric "PublishSuccessCount,DeliverySuccessCount,DeliveryFailCount" \
@@ -535,7 +551,7 @@ DL_STORAGE_ID=$(az storage account show \
 az eventgrid event-subscription update \
   --name "sub-all-aggregates" \
   --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC_NAME \
+    --name $EG_TOPIC \
     --resource-group $RG \
     --query id --output tsv) \
   --deadletter-endpoint "${DL_STORAGE_ID}/blobServices/default/containers/eg-dead-letters"
