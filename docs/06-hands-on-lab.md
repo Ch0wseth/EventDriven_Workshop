@@ -391,11 +391,11 @@ SELECT
     AVG(CAST(value AS float))   AS avgValue,
     MIN(CAST(value AS float))   AS minValue,
     MAX(CAST(value AS float))   AS maxValue,
-    NEWID()                     AS id
+    CONCAT(type, '-', CAST(System.Timestamp() AS nvarchar(max))) AS id
 INTO
     [cosmos-output]
 FROM
-    [eh-input] PARTITION BY PartitionId
+    [eh-input] TIMESTAMP BY timestamp
 GROUP BY
     type,
     TumblingWindow(minute, 5)

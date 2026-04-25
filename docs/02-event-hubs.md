@@ -63,7 +63,6 @@ SA_JOB="sa-workshop-$SUFFIX"
 
 # Event Grid
 EG_TOPIC="egt-workshop-$SUFFIX"
-EG_SUBSCRIPTION="egs-notification"
 ```
 
 ### Resource Group
@@ -109,7 +108,8 @@ az eventhubs eventhub create \
   --namespace-name $EH_NAMESPACE \
   --resource-group $RG \
   --partition-count 4 \
-  --retention-time-in-hours 168
+  --retention-time 168 \
+  --cleanup-policy Delete
 
 echo "✅ Event Hub créé : $EH_NAME (4 partitions, rétention 7j)"
 ```
@@ -231,8 +231,8 @@ az functionapp create \
   --name $FUNC_APP \
   --resource-group $RG \
   --consumption-plan-location $LOCATION \
-  --runtime python \
-  --runtime-version 3.11 \
+  --runtime java \
+  --runtime-version 21.0 \
   --functions-version 4 \
   --storage-account $STORAGE_ACCOUNT \
   --os-type Linux
@@ -247,7 +247,7 @@ az functionapp config appsettings set \
   --name $FUNC_APP \
   --resource-group $RG \
   --settings \
-    "EVENT_HUB_CONNECTION_STRING=$EH_PRODUCER_CS" \
+    "EH_PRODUCER_CS=$EH_PRODUCER_CS" \
     "EVENT_HUB_NAME=$EH_NAME"
 
 echo "✅ Variables configurées sur la Function App"
@@ -281,7 +281,7 @@ az cosmosdb sql container create \
   --resource-group $RG \
   --database-name $COSMOS_DB \
   --name $COSMOS_CONTAINER \
-  --partition-key-path "/entityId" \
+  --partition-key-path "/type" \
   --throughput 400
 
 COSMOS_KEY=$(az cosmosdb keys list \
@@ -309,8 +309,8 @@ az stream-analytics job create \
   --resource-group $RG \
   --location $LOCATION \
   --output-error-policy Drop \
-  --events-out-of-order-policy Adjust \
-  --events-out-of-order-max-delay-in-seconds 5 \
+  --out-of-order-policy Adjust \
+  --order-max-delay 5 \
   --compatibility-level 1.2
 
 echo "✅ Stream Analytics job créé : $SA_JOB"
@@ -329,11 +329,11 @@ SA_CONSUMER_KEY=$(az eventhubs namespace authorization-rule keys list \
 az stream-analytics input create \
   --job-name $SA_JOB \
   --resource-group $RG \
-  --name "input-eventhub" \
+  --name "eh-input" \
   --properties '{
     "type": "Stream",
     "datasource": {
-      "type": "Microsoft.ServiceBus/EventHub",
+      "type": "Microsoft.EventHub/EventHub",
       "properties": {
         "eventHubName": "'"$EH_NAME"'",
         "serviceBusNamespace": "'"$EH_NAMESPACE"'",
@@ -354,18 +354,16 @@ echo "✅ Entrée Event Hubs configurée"
 az stream-analytics output create \
   --job-name $SA_JOB \
   --resource-group $RG \
-  --name "output-cosmos" \
-  --properties '{
-    "datasource": {
-      "type": "Microsoft.Storage/DocumentDB",
-      "properties": {
-        "accountId": "'"$COSMOS_ACCOUNT"'",
-        "accountKey": "'"$COSMOS_KEY"'",
-        "database": "'"$COSMOS_DB"'",
-        "collectionNamePattern": "'"$COSMOS_CONTAINER"'",
-        "partitionKey": "entityId",
-        "documentId": "aggregateId"
-      }
+  --name "cosmos-output" \
+  --datasource '{
+    "type": "Microsoft.Storage/DocumentDB",
+    "properties": {
+      "accountId": "'"$COSMOS_ACCOUNT"'",
+      "accountKey": "'"$COSMOS_KEY"'",
+      "database": "'"$COSMOS_DB"'",
+      "collectionNamePattern": "'"$COSMOS_CONTAINER"'",
+      "partitionKey": "type",
+      "documentId": "id"
     }
   }'
 
@@ -380,28 +378,26 @@ az stream-analytics transformation create \
   --resource-group $RG \
   --name "transformation" \
   --streaming-units 1 \
-  --query-statement "
+  --saql "
     SELECT
-        System.Timestamp()  AS windowEnd,
-        type                AS eventType,
-        entityId,
-        COUNT(*)            AS eventCount,
-        MIN(timestamp)      AS firstSeen,
-        MAX(timestamp)      AS lastSeen,
-        CONCAT(type, '-', entityId, '-',
-               CAST(System.Timestamp() AS nvarchar(max))) AS aggregateId
-    INTO [output-cosmos]
-    FROM [input-eventhub] TIMESTAMP BY timestamp
+        System.Timestamp()          AS windowEnd,
+        type,
+        COUNT(*)                    AS eventCount,
+        AVG(CAST(value AS float))   AS avgValue,
+        MIN(CAST(value AS float))   AS minValue,
+        MAX(CAST(value AS float))   AS maxValue,
+        CONCAT(type, '-', CAST(System.Timestamp() AS nvarchar(max))) AS id
+    INTO [cosmos-output]
+    FROM [eh-input] TIMESTAMP BY timestamp
     GROUP BY
         type,
-        entityId,
-        TumblingWindow(minute, 1)
+        TumblingWindow(minute, 5)
   "
 
 echo "✅ Requête configurée"
 ```
 
-> **TumblingWindow(minute, 1)** : agrège tous les événements du même type pour la même entité par fenêtre d'1 minute, sans overlap.
+> **TumblingWindow(minute, 5)** : agrège tous les événements du même type par fenêtre de 5 minutes, sans overlap.
 
 ### Démarrer le job
 
@@ -409,7 +405,7 @@ echo "✅ Requête configurée"
 az stream-analytics job start \
   --name $SA_JOB \
   --resource-group $RG \
-  --output-start-mode LastOutputEventTime
+  --output-start-mode JobStartTime
 
 echo "✅ Stream Analytics démarré"
 ```
@@ -443,24 +439,7 @@ EG_KEY=$(az eventgrid topic key list \
 echo "✅ Event Grid Topic créé : $EG_TOPIC"
 ```
 
-### Créer une subscription
-
-```bash
-# Remplacez par votre endpoint de test (ex: https://webhook.site/votre-id)
-WEBHOOK_URL="https://webhook.site/votre-id-unique"
-
-az eventgrid event-subscription create \
-  --name $EG_SUBSCRIPTION \
-  --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC \
-    --resource-group $RG \
-    --query id \
-    --output tsv) \
-  --endpoint $WEBHOOK_URL \
-  --endpoint-type webhook
-
-echo "✅ Subscription Event Grid créée → $WEBHOOK_URL"
-```
+> 📌 La création de l'abonnement Event Grid sur la Function `EventGridHandler` est réalisée dans le **module 06 — lab final**, une fois la Function déployée.
 
 ---
 
@@ -482,9 +461,6 @@ param suffix string = uniqueString(resourceGroup().id)
 
 @description('Région Azure')
 param location string = resourceGroup().location
-
-@description('URL du webhook Event Grid (ex: https://webhook.site/votre-id)')
-param webhookUrl string
 
 // ──────────────────────────────────────────────────────────────────
 // ① Event Hubs — Bus de streaming central
@@ -573,12 +549,12 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
   properties: {
     serverFarmId: hostingPlan.id
     siteConfig: {
-      linuxFxVersion: 'Python|3.11'
+      linuxFxVersion: 'Java|21'
       appSettings: [
         { name: 'AzureWebJobsStorage',         value: storageCs }
         { name: 'FUNCTIONS_EXTENSION_VERSION',  value: '~4' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME',     value: 'python' }
-        { name: 'EVENT_HUB_CONNECTION_STRING',  value: authProducer.listKeys().primaryConnectionString }
+        { name: 'FUNCTIONS_WORKER_RUNTIME',     value: 'java' }
+        { name: 'EH_PRODUCER_CS',              value: authProducer.listKeys().primaryConnectionString }
         { name: 'EVENT_HUB_NAME',               value: eventHub.name }
       ]
     }
@@ -667,8 +643,8 @@ resource saOutput 'Microsoft.StreamAnalytics/streamingjobs/outputs@2021-10-01-pr
         accountKey: cosmosAccount.listKeys().primaryMasterKey
         database: cosmosDatabase.name
         collectionNamePattern: cosmosContainer.name
-        partitionKey: 'entityId'
-        documentId: 'windowEnd'
+        partitionKey: 'type'
+        documentId: 'id'
       }
     }
   }
@@ -681,13 +657,16 @@ resource saTransformation 'Microsoft.StreamAnalytics/streamingjobs/transformatio
     streamingUnits: 1
     query: '''
 SELECT
+    System.Timestamp()          AS windowEnd,
     type,
-    entityId,
-    COUNT(*) AS eventCount,
-    System.Timestamp() AS windowEnd
-INTO [output-cosmos]
-FROM [input-eventhub] TIMESTAMP BY timestamp
-GROUP BY type, entityId, TumblingWindow(minute, 1)
+    COUNT(*)                    AS eventCount,
+    AVG(CAST(value AS float))   AS avgValue,
+    MIN(CAST(value AS float))   AS minValue,
+    MAX(CAST(value AS float))   AS maxValue,
+    CONCAT(type, '-', CAST(System.Timestamp() AS nvarchar(max))) AS id
+INTO [cosmos-output]
+FROM [eh-input] TIMESTAMP BY timestamp
+GROUP BY type, TumblingWindow(minute, 5)
     '''
   }
 }
@@ -699,18 +678,6 @@ GROUP BY type, entityId, TumblingWindow(minute, 1)
 resource egTopic 'Microsoft.EventGrid/topics@2022-06-15' = {
   name: 'egt-workshop-${suffix}'
   location: location
-}
-
-resource egSubscription 'Microsoft.EventGrid/eventSubscriptions@2022-06-15' = {
-  name: 'egs-notification'
-  scope: egTopic
-  properties: {
-    destination: {
-      endpointType: 'WebHook'
-      properties: { endpointUrl: webhookUrl }
-    }
-    filter: { includedEventTypes: [] }
-  }
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -739,7 +706,6 @@ az deployment group create \
   --template-file infra/main.bicep \
   --parameters \
       suffix=$SUFFIX \
-      webhookUrl="https://webhook.site/votre-id-unique" \
   --name "deploy-eda-workshop"
 
 echo "✅ Infrastructure déployée"
@@ -794,7 +760,7 @@ az resource list \
 az stream-analytics job show \
   --name $SA_JOB \
   --resource-group $RG \
-  --query "properties.jobState" \
+  --query "jobState" \
   --output tsv
 ```
 
@@ -819,9 +785,9 @@ L'infrastructure est validée quand toutes les ressources apparaissent avec le s
 | Consumer Group `cg-app` | Lecture temps réel (app consommatrice) |
 | Consumer Group `cg-analytics` | Lecture analytique (Stream Analytics) |
 | Storage Account | Checkpoints + déploiement Function |
-| Function App | Adaptateur HTTP → Event Hubs (validation + normalisation) |
+| Function App | Adaptateur HTTP → Event Hubs (Java 21) |
 | Cosmos DB | Persistance des agrégats Stream Analytics |
-| Stream Analytics | Agrégation TumblingWindow(1 min) par type + entité |
+| Stream Analytics | Agrégation TumblingWindow(5 min) par type |
 | Event Grid Topic | Routing réactif des événements depuis Cosmos DB |
 
 ---

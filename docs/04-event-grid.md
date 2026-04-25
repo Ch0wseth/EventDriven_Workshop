@@ -124,8 +124,8 @@ Le topic existe déjà (module 02). On ajoute maintenant des abonnements **spéc
 graph LR
     T["$EG_TOPIC\negt-workshop-xxx"]
 
-    T -->|"eventType = EDA.Aggregate.*"| S1["sub-aggregates\n→ webhook.site (test)"]
-    T -->|"eventType = EDA.Alert.*"| S2["sub-alerts\n→ webhook.site (test)"]
+    T -->|"eventType = EDA.Aggregate.*"| S1["sub-aggregates\n→ EventGridHandler"]
+    T -->|"eventType = EDA.Alert.*"| S2["sub-alerts\n→ EventGridHandler"]
 
     style T fill:#7FBA00,color:#fff
 ```
@@ -134,42 +134,17 @@ graph LR
 
 > 📌 Le branchement de l'abonnement Event Grid sur la Function `EventGridHandler` est réalisé dans le **module 06 — lab final**, une fois la Function déployée avec l'ensemble du pipeline.
 
-### Créer un abonnement — Webhook (test)
+### Filtres avancés — concepts
 
-```bash
-# Endpoint de test — générez votre URL sur https://webhook.site
-WEBHOOK_URL="https://webhook.site/votre-id-unique"
+Event Grid supporte deux types de filtres sur un abonnement :
 
-az eventgrid event-subscription create \
-  --name "sub-aggregates" \
-  --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC \
-    --resource-group $RG \
-    --query id --output tsv) \
-  --endpoint-type webhook \
-  --endpoint $WEBHOOK_URL \
-  --included-event-types "EDA.Aggregate.Created"
+| Filtre | Paramètre CLI | Exemple |
+|--------|---------------|---------|
+| Par type d'événement | `--included-event-types` | `EDA.Aggregate.Created` |
+| Par préfixe de subject | `--subject-begins-with` | `aggregates/OrderPlaced/` |
+| Par suffixe de subject | `--subject-ends-with` | `/critical` |
 
-echo "✅ Abonnement créé : sub-aggregates → Webhook"
-```
-
-### Filtres avancés
-
-```bash
-# Filtrer par préfixe de subject
-az eventgrid event-subscription create \
-  --name "sub-alerts" \
-  --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC \
-    --resource-group $RG \
-    --query id --output tsv) \
-  --endpoint-type webhook \
-  --endpoint $WEBHOOK_URL \
-  --subject-begins-with "aggregates/OrderPlaced/" \
-  --included-event-types "EDA.Aggregate.Created"
-
-echo "✅ Filtre subject : OrderPlaced uniquement"
-```
+Ces filtres sont configurés lors de la création de l'abonnement dans le **module 06**.
 
 ---
 
