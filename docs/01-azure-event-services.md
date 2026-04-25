@@ -253,9 +253,9 @@ Pour rendre l'architecture tangible, voici comment elle se comporte sur un évé
 
 ## ➡️ Prochaine Étape
 
-Plongeons dans Event Hubs avec un lab pratique !
+Maintenant que vous connaissez l'architecture et le rôle de chaque composant, passons au déploiement !
 
-**[Module 2 : Azure Event Hubs - Fondamentaux →](./02-event-hubs.md)**
+**[Module 2 : Déploiement de l'Architecture →](./02-event-hubs.md)**
 
 ---
 

@@ -1,592 +1,836 @@
-# Module 2 : Azure Event Hubs - Lab Pratique
+# Module 2 : Déploiement de l'Architecture de Référence
 
 ## 🎯 Objectifs
 
-Dans ce module, vous allez :
-- Créer un Event Hub namespace et un Event Hub
-- Implémenter un producteur d'événements
-- Implémenter un consommateur d'événements
-- Comprendre les partitions et consumer groups
-- Monitorer votre Event Hub
+Dans ce module, vous allez **déployer l'intégralité de l'architecture de référence** vue en module 1. Deux méthodes sont proposées — choisissez celle qui correspond à votre contexte :
 
-## 📚 Rappel : Qu'est-ce qu'Event Hubs ?
+| | Méthode | Quand l'utiliser |
+|---|---|---|
+| 🔧 | **Azure CLI** — commande par commande | Comprendre chaque service en détail, démo pas à pas |
+| 🏗️ | **Bicep** — infrastructure as code | Déploiement reproductible, CI/CD, projet réel |
 
-Azure Event Hubs est une plateforme de **streaming big data** et un service d'**ingestion d'événements** capable de recevoir et traiter des millions d'événements par seconde.
+> Les **variables d'initialisation** (section ①) sont communes aux deux méthodes.
 
-### Architecture Event Hubs
-
-```mermaid
-graph LR
-    P1[Producer 1] -->|Events| EH[Event Hub]
-    P2[Producer 2] -->|Events| EH
-    P3[Producer N] -->|Events| EH
-    
-    EH -->|Partition 0| CG1[Consumer Group 1]
-    EH -->|Partition 1| CG1
-    EH -->|Partition 2| CG1
-    
-    EH -.->|Partition 0| CG2[Consumer Group 2]
-    EH -.->|Partition 1| CG2
-    EH -.->|Partition 2| CG2
-    
-    style EH fill:#0078d4,color:#fff
-    style CG1 fill:#50e6ff,color:#000
-    style CG2 fill:#50e6ff,color:#000
+```
+Sources ──> Azure Functions ──> Event Hubs ──┬──> App Consommatrice
+                                              └──> Stream Analytics ──> Cosmos DB
+                                                       Cosmos DB change feed
+                                                              ↓
+                                                        Event Grid ──> Handlers
 ```
 
-### Concepts Clés
+**Pré-requis :**
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) installé (`az --version`)
+- Être connecté : `az login`
+- Un abonnement Azure actif
 
-#### 1. **Partitions**
-- Division logique des données
-- Parallélisation du traitement
-- Ordre garanti **au sein d'une partition**
-- Généralement 2 à 32 partitions
+---
 
-#### 2. **Consumer Groups**
-- Vue indépendante du stream
-- Plusieurs applications peuvent lire le même stream
-- Par défaut : `$Default`
+## ① Initialisation
 
-#### 3. **Event Data**
-- Payload : Vos données (JSON, Avro, etc.)
-- Metadata : Offset, sequence number, enqueue time
-- Partition Key : Pour router vers une partition spécifique
+### Variables globales
 
-## 🛠️ Lab 1 : Créer l'Infrastructure
-
-### Étape 1 : Créer le Resource Group
+Copiez ce bloc en entier dans votre terminal. Toutes les commandes suivantes s'y réfèrent.
 
 ```bash
-# Variables
-RESOURCE_GROUP="rg-eventhubs-workshop"
+# Identifiant unique pour éviter les conflits de noms
+SUFFIX=$RANDOM
+
+# Groupe de ressources
+RG="rg-eda-workshop"
 LOCATION="francecentral"
-NAMESPACE_NAME="evhns-workshop-$RANDOM"
-EVENTHUB_NAME="business-events"
 
-# Créer le resource group
-az group create \
-  --name $RESOURCE_GROUP \
-  --location $LOCATION
+# Event Hubs
+EH_NAMESPACE="evhns-workshop-$SUFFIX"
+EH_NAME="business-events"
+EH_CG_APP="cg-app"        # Consumer Group A → App consommatrice
+EH_CG_SA="cg-analytics"   # Consumer Group B → Stream Analytics
+
+# Storage (checkpoints consommateurs)
+STORAGE_ACCOUNT="stworkshop$SUFFIX"
+CHECKPOINT_CONTAINER="eh-checkpoints"
+
+# Azure Functions
+FUNC_APP="func-ingest-$SUFFIX"
+
+# Cosmos DB
+COSMOS_ACCOUNT="cosmos-workshop-$SUFFIX"
+COSMOS_DB="eda-db"
+COSMOS_CONTAINER="events"
+
+# Stream Analytics
+SA_JOB="sa-workshop-$SUFFIX"
+
+# Event Grid
+EG_TOPIC="egt-workshop-$SUFFIX"
+EG_SUBSCRIPTION="egs-notification"
 ```
 
-### Étape 2 : Créer l'Event Hub Namespace
+### Resource Group
 
 ```bash
-# Créer le namespace (Standard tier pour ce workshop)
+az group create \
+  --name $RG \
+  --location $LOCATION
+
+echo "✅ Resource Group créé : $RG"
+```
+
+---
+
+## 🔧 Méthode 1 — Azure CLI
+
+> Déployez chaque service étape par étape. Idéal pour comprendre le rôle de chaque composant et observer son comportement avant de passer au suivant.
+
+## ② Azure Event Hubs
+
+Event Hubs est le **cœur du pipeline**. On le déploie en premier — tout le reste s'y connecte.
+
+### Namespace
+
+```bash
 az eventhubs namespace create \
-  --name $NAMESPACE_NAME \
-  --resource-group $RESOURCE_GROUP \
+  --name $EH_NAMESPACE \
+  --resource-group $RG \
   --location $LOCATION \
   --sku Standard \
-  --capacity 1 \
-  --enable-auto-inflate false
+  --capacity 1
 
-# Vérifier la création
-az eventhubs namespace show \
-  --name $NAMESPACE_NAME \
-  --resource-group $RESOURCE_GROUP \
-  --query "{Name:name, Status:status, ServiceBusEndpoint:serviceBusEndpoint}"
+echo "✅ Namespace créé : $EH_NAMESPACE"
 ```
 
-**Tiers disponibles :**
-- **Basic** : 1 consumer group, rétention 1 jour
-- **Standard** : 20 consumer groups, rétention 7 jours, Kafka
-- **Premium** : Isolation, rétention 90 jours, 100 consumer groups
-- **Dedicated** : Clusters dédiés
+> **Standard** = 20 consumer groups, rétention 7 jours, compatibilité Kafka. Suffisant pour ce workshop.
 
-### Étape 3 : Créer l'Event Hub
+### Event Hub
 
 ```bash
-# Créer l'Event Hub avec 4 partitions
 az eventhubs eventhub create \
-  --name $EVENTHUB_NAME \
-  --namespace-name $NAMESPACE_NAME \
-  --resource-group $RESOURCE_GROUP \
+  --name $EH_NAME \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
   --partition-count 4 \
-  --message-retention 1
+  --retention-time-in-hours 168
 
-# Lister les Event Hubs
-az eventhubs eventhub list \
-  --namespace-name $NAMESPACE_NAME \
-  --resource-group $RESOURCE_GROUP \
-  --output table
+echo "✅ Event Hub créé : $EH_NAME (4 partitions, rétention 7j)"
 ```
 
-### Étape 4 : Obtenir la Connection String
+### Consumer Groups
+
+Deux consumer groups indépendants — chacun lit le stream à son propre rythme, avec son propre offset.
 
 ```bash
-# Obtenir la connection string
-CONNECTION_STRING=$(az eventhubs namespace authorization-rule keys list \
-  --namespace-name $NAMESPACE_NAME \
-  --resource-group $RESOURCE_GROUP \
-  --name RootManageSharedAccessKey \
+# Consumer Group A → App consommatrice (dashboard, microservice)
+az eventhubs eventhub consumer-group create \
+  --name $EH_CG_APP \
+  --eventhub-name $EH_NAME \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG
+
+# Consumer Group B → Stream Analytics
+az eventhubs eventhub consumer-group create \
+  --name $EH_CG_SA \
+  --eventhub-name $EH_NAME \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG
+
+echo "✅ Consumer Groups créés : $EH_CG_APP | $EH_CG_SA"
+```
+
+### Policies d'accès
+
+Principe du **moindre privilège** — chaque composant n'a accès qu'à ce dont il a besoin.
+
+```bash
+# Policy producteur (Send uniquement)
+az eventhubs namespace authorization-rule create \
+  --name "policy-producer" \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --rights Send
+
+# Policy consommateur (Listen uniquement)
+az eventhubs namespace authorization-rule create \
+  --name "policy-consumer" \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --rights Listen
+
+echo "✅ Policies créées : policy-producer | policy-consumer"
+```
+
+### Récupérer les connection strings
+
+```bash
+EH_PRODUCER_CS=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --name "policy-producer" \
   --query primaryConnectionString \
   --output tsv)
 
-echo "Connection String: $CONNECTION_STRING"
+EH_CONSUMER_CS=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --name "policy-consumer" \
+  --query primaryConnectionString \
+  --output tsv)
 
-# Sauvegarder dans un fichier .env
-cat > .env << EOF
-EVENT_HUB_CONNECTION_STRING="$CONNECTION_STRING"
-EVENT_HUB_NAME="$EVENTHUB_NAME"
-EOF
+echo "✅ Connection strings récupérées"
 ```
 
-> ⚠️ **Sécurité** : En production, utilisez Azure Key Vault et Managed Identity !
-
-> 📘 **Pour aller plus loin** : Consultez le [PRODUCTION_GUIDE.md](./PRODUCTION_GUIDE.md) pour comprendre **pourquoi** utiliser Managed Identity, comment implémenter Key Vault, Private Endpoints, et toutes les best practices de sécurité.
-
-## 💻 Lab 2 : Implémenter un Producteur
-
-### Installation
-
-Créez un projet Maven :
+### Vérification
 
 ```bash
-mvn archetype:generate \
-  -DgroupId=com.example.eventhubs \
-  -DartifactId=event-hub-producer \
-  -DarchetypeArtifactId=maven-archetype-quickstart \
-  -DinteractiveMode=false
-
-cd event-hub-producer
-```
-
-Ajoutez les dépendances dans `pom.xml` :
-
-```xml
-<dependencies>
-    <!-- Azure Event Hubs SDK -->
-    <dependency>
-        <groupId>com.azure</groupId>
-        <artifactId>azure-messaging-eventhubs</artifactId>
-        <version>5.18.0</version>
-    </dependency>
-    
-    <!-- JSON -->
-    <dependency>
-        <groupId>com.google.code.gson</groupId>
-        <artifactId>gson</artifactId>
-        <version>2.10.1</version>
-    </dependency>
-    
-    <!-- Environment variables -->
-    <dependency>
-        <groupId>io.github.cdimascio</groupId>
-        <artifactId>dotenv-java</artifactId>
-        <version>3.0.0</version>
-    </dependency>
-</dependencies>
-```
-
-#### Code : `src/main/java/com/example/eventhubs/EventHubProducer.java`
-
-```java
-package com.example.eventhubs;
-
-import com.azure.messaging.eventhubs.*;
-import com.google.gson.Gson;
-import io.github.cdimascio.dotenv.Dotenv;
-
-import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.ThreadLocalRandom;
-
-public class EventHubProducer {
-    
-    private static final String[] SOURCES = {
-        "source-app-001", "source-app-002", "source-app-003", "source-app-004"
-    };
-    
-    public static void main(String[] args) throws Exception {
-        // Charger les variables d'environnement
-        Dotenv dotenv = Dotenv.configure().directory("..").load();
-        String connectionString = dotenv.get("EVENT_HUB_CONNECTION_STRING");
-        String eventHubName = dotenv.get("EVENT_HUB_NAME");
-        
-        // Créer le producer client
-        EventHubProducerClient producer = new EventHubClientBuilder()
-            .connectionString(connectionString, eventHubName)
-            .buildProducerClient();
-        
-        System.out.println("📤 Producer connecté à Event Hub: " + eventHubName);
-        System.out.println("Envoi d'événements métier...\n");
-        
-        Gson gson = new Gson();
-        Random random = ThreadLocalRandom.current();
-        
-        try {
-            for (int i = 0; i < 50; i++) {
-                // Créer un batch d'événements
-                EventDataBatch batch = producer.createBatch();
-                
-                // Ajouter plusieurs événements au batch
-                for (int j = 0; j < 5; j++) {
-                    BusinessEvent event = new BusinessEvent(
-                        SOURCES[random.nextInt(SOURCES.length)],
-                        "EVENT_TYPE_" + random.nextInt(5),
-                        "ENTITY-" + random.nextInt(100),
-                        random.nextDouble() > 0.05 ? "SUCCESS" : "FAILED",
-                        Instant.now().toString(),
-                        UUID.randomUUID().toString()
-                    );
-                    
-                    EventData eventData = new EventData(gson.toJson(event));
-                    
-                    // Ajouter partition key pour garantir l'ordre par source
-                    eventData.getProperties().put("SourceId", event.sourceId);
-                    
-                    if (!batch.tryAdd(eventData)) {
-                        throw new IllegalStateException("Event is too large for the batch!");
-                    }
-                }
-                
-                // Envoyer le batch
-                producer.send(batch);
-                System.out.printf("✅ Batch %d envoyé : %d événements%n", i + 1, batch.getCount());
-                
-                Thread.sleep(1000); // Attendre 1 seconde
-            }
-            
-            System.out.println("\n🎉 Envoi terminé !");
-            
-        } finally {
-            producer.close();
-        }
-    }
-    
-    // Classe pour les événements métier
-    static class BusinessEvent {
-        String sourceId;
-        String eventType;
-        String entityId;
-        String status;
-        String timestamp;
-        String eventId;
-        
-        BusinessEvent(String sourceId, String eventType, String entityId,
-                     String status, String timestamp, String eventId) {
-            this.sourceId = sourceId;
-            this.eventType = eventType;
-            this.entityId = entityId;
-            this.status = status;
-            this.timestamp = timestamp;
-            this.eventId = eventId;
-        }
-    }
-}
-```
-
-#### Exécution
-
-```bash
-# Compiler
-mvn clean package
-
-# Exécuter
-mvn exec:java -Dexec.mainClass="com.example.eventhubs.EventHubProducer"
-
-# Ou directement
-java -cp target/event-hub-producer-1.0-SNAPSHOT.jar:~/.m2/repository/**/*.jar \
-  com.example.eventhubs.EventHubProducer
-```
-
----
-
-## 📥 Lab 3 : Implémenter un Consommateur
-
-### Installation
-
-Créez un projet Maven pour le consommateur :
-
-```bash
-mvn archetype:generate \
-  -DgroupId=com.example.eventhubs \
-  -DartifactId=event-hub-consumer \
-  -DarchetypeArtifactId=maven-archetype-quickstart \
-  -DinteractiveMode=false
-
-cd event-hub-consumer
-```
-
-Ajoutez les dépendances dans `pom.xml` :
-
-```xml
-<dependencies>
-    <!-- Azure Event Hubs SDK -->
-    <dependency>
-        <groupId>com.azure</groupId>
-        <artifactId>azure-messaging-eventhubs</artifactId>
-        <version>5.18.0</version>
-    </dependency>
-    
-    <!-- Event Processor (avec checkpointing) -->
-    <dependency>
-        <groupId>com.azure</groupId>
-        <artifactId>azure-messaging-eventhubs-checkpointstore-blob</artifactId>
-        <version>1.19.0</version>
-    </dependency>
-    
-    <!-- Azure Storage Blobs -->
-    <dependency>
-        <groupId>com.azure</groupId>
-        <artifactId>azure-storage-blob</artifactId>
-        <version>12.25.0</version>
-    </dependency>
-    
-    <!-- JSON -->
-    <dependency>
-        <groupId>com.google.code.gson</groupId>
-        <artifactId>gson</artifactId>
-        <version>2.10.1</version>
-    </dependency>
-    
-    <!-- Environment variables -->
-    <dependency>
-        <groupId>io.github.cdimascio</groupId>
-        <artifactId>dotenv-java</artifactId>
-        <version>3.0.0</version>
-    </dependency>
-</dependencies>
-```
-
-### Code : `src/main/java/com/example/eventhubs/EventHubConsumer.java`
-
-```java
-package com.example.eventhubs;
-
-import com.azure.messaging.eventhubs.*;
-import com.azure.messaging.eventhubs.checkpointstore.blob.BlobCheckpointStore;
-import com.azure.messaging.eventhubs.models.*;
-import com.azure.storage.blob.BlobContainerAsyncClient;
-import com.azure.storage.blob.BlobContainerClientBuilder;
-import com.google.gson.Gson;
-import io.github.cdimascio.dotenv.Dotenv;
-
-import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
-
-public class EventHubConsumer {
-    
-    public static void main(String[] args) throws Exception {
-        // Charger les variables d'environnement
-        Dotenv dotenv = Dotenv.configure().directory("..").load();
-        String connectionString = dotenv.get("EVENT_HUB_CONNECTION_STRING");
-        String eventHubName = dotenv.get("EVENT_HUB_NAME");
-        String storageConnectionString = dotenv.get("STORAGE_CONNECTION_STRING");
-        String containerName = "eventhub-checkpoints";
-        
-        Gson gson = new Gson();
-        
-        // Option 1: Consumer simple (sans checkpoint)
-        if (storageConnectionString == null || storageConnectionString.isEmpty()) {
-            simpleConsumer(connectionString, eventHubName, gson);
-        } else {
-            // Option 2: Event Processor avec checkpoint (recommandé)
-            eventProcessorConsumer(connectionString, eventHubName, 
-                                   storageConnectionString, containerName, gson);
-        }
-    }
-    
-    // Option 1: Consumer simple (démonstration seulement)
-    private static void simpleConsumer(String connectionString, String eventHubName, Gson gson) {
-        System.out.println("📥 Consumer simple connecté à Event Hub: " + eventHubName);
-        System.out.println("En attente d'événements... (Ctrl+C pour arrêter)\n");
-        
-        // Créer le consumer client
-        EventHubConsumerAsyncClient consumer = new EventHubClientBuilder()
-            .connectionString(connectionString, eventHubName)
-            .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
-            .buildAsyncConsumerClient();
-        
-        // Lire les événements de toutes les partitions
-        consumer.receiveFromPartition("0", EventPosition.latest())
-            .subscribe(
-                partitionEvent -> {
-                    String body = partitionEvent.getData().getBodyAsString();
-                    System.out.printf("📨 Partition %s: %s%n", 
-                        partitionEvent.getPartitionContext().getPartitionId(), body);
-                },
-                error -> System.err.println("❌ Erreur: " + error.getMessage()),
-                () -> System.out.println("✅ Stream terminé")
-            );
-        
-        // Garder le consumer actif
-        try {
-            System.in.read();
-        } catch (Exception e) {
-            e.printStackTrace();
-        } finally {
-            consumer.close();
-        }
-    }
-    
-    // Option 2: Event Processor avec checkpoint (recommandé en production)
-    private static void eventProcessorConsumer(String connectionString, 
-                                               String eventHubName, 
-                                               String storageConnectionString,
-                                               String containerName,
-                                               Gson gson) throws InterruptedException {
-        
-        // Créer le Blob container pour les checkpoints
-        BlobContainerAsyncClient blobContainerAsyncClient = 
-            new BlobContainerClientBuilder()
-                .connectionString(storageConnectionString)
-                .containerName(containerName)
-                .buildAsyncClient();
-        
-        // Créer le checkpoint store
-        BlobCheckpointStore checkpointStore = new BlobCheckpointStore(blobContainerAsyncClient);
-        
-        // Créer l'Event Processor
-        EventProcessorClient eventProcessorClient = new EventProcessorClientBuilder()
-            .connectionString(connectionString, eventHubName)
-            .consumerGroup(EventHubClientBuilder.DEFAULT_CONSUMER_GROUP_NAME)
-            .checkpointStore(checkpointStore)
-            .processEvent(eventContext -> {
-                // Traiter chaque événement
-                EventData eventData = eventContext.getEventData();
-                String body = eventData.getBodyAsString();
-                
-                System.out.printf("📨 Partition %s (offset %d): %s%n",
-                    eventContext.getPartitionContext().getPartitionId(),
-                    eventData.getOffset(),
-                    body);
-                
-                // Checkpoint (sauvegarde de la position)
-                eventContext.updateCheckpoint();
-            })
-            .processError(errorContext -> {
-                System.err.printf("❌ Erreur sur partition %s: %s%n",
-                    errorContext.getPartitionContext().getPartitionId(),
-                    errorContext.getThrowable().getMessage());
-            })
-            .buildEventProcessorClient();
-        
-        System.out.println("📥 Event Processor connecté à Event Hub: " + eventHubName);
-        System.out.println("En attente d'événements... (Ctrl+C pour arrêter)\n");
-        
-        // Démarrer le processor
-        eventProcessorClient.start();
-        
-        // Garder le processor actif
-        System.out.println("Appuyez sur Entrée pour arrêter...");
-        System.in.read();
-        
-        // Arrêter proprement
-        eventProcessorClient.stop();
-        TimeUnit.SECONDS.sleep(2);
-        
-        System.out.println("\n🛑 Event Processor arrêté.");
-    }
-}
-```
-
-### Exécution
-
-```bash
-# Pour le consumer simple (sans checkpoint)
-mvn exec:java -Dexec.mainClass="com.example.eventhubs.EventHubConsumer"
-
-# Pour tester avec checkpoint, créez d'abord un Storage Account et ajoutez dans .env :
-# STORAGE_CONNECTION_STRING="DefaultEndpointsProtocol=https;AccountName=..."
-
-# Créer le container pour les checkpoints
-az storage container create \
-  --name eventhub-checkpoints \
-  --account-name <STORAGE_ACCOUNT_NAME> \
-  --auth-mode login
-```
-
----
-
-## 🔍 Lab 4 : Monitoring et Observabilité
-
-### Métriques dans le Portail Azure
-
-1. Allez dans le portail Azure
-2. Naviguez vers votre Event Hub namespace
-3. Section **Metrics**
-
-**Métriques importantes :**
-- **Incoming Messages** : Événements entrants
-- **Outgoing Messages** : Événements consommés
-- **Throttled Requests** : Requêtes limitées (quota atteint)
-- **Server Errors** : Erreurs côté serveur
-- **User Errors** : Erreurs côté client
-
-### Monitoring via Azure CLI
-
-```bash
-# Voir les métriques des 5 dernières minutes
-az monitor metrics list \
-  --resource $(az eventhubs namespace show \
-    --name $NAMESPACE_NAME \
-    --resource-group $RESOURCE_GROUP \
-    --query id -o tsv) \
-  --metric IncomingMessages \
-  --interval PT1M
-
-# Voir les consumer groups
 az eventhubs eventhub consumer-group list \
-  --namespace-name $NAMESPACE_NAME \
-  --eventhub-name $EVENTHUB_NAME \
-  --resource-group $RESOURCE_GROUP \
+  --eventhub-name $EH_NAME \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
   --output table
 ```
 
-## 🎯 Exercice : Partition Key
+Vous devez voir : `$default`, `cg-app`, `cg-analytics`.
 
-**Objectif :** Comprendre l'impact de la partition key sur l'ordre des événements.
+---
 
-### Défi
+## ③ Storage Account
 
-Modifiez votre producteur pour :
-1. Envoyer des événements **sans** partition key
-2. Envoyer des événements **avec** partition key (basée sur SourceId)
-3. Observer la différence dans l'ordre de réception
-
-**Question :** Pourquoi l'ordre est-il important pour certains cas d'usage ?
-
-<details>
-<summary>💡 Indice</summary>
-L'ordre est crucial pour les données de séries temporelles (IoT, logs) où la séquence des événements a du sens.
-</details>
-
-## 🧹 Nettoyage
+Nécessaire pour les **checkpoints** des consommateurs Event Hubs et le **déploiement** de la Function App.
 
 ```bash
-# Supprimer toutes les ressources
-az group delete \
-  --name $RESOURCE_GROUP \
-  --yes \
-  --no-wait
+az storage account create \
+  --name $STORAGE_ACCOUNT \
+  --resource-group $RG \
+  --location $LOCATION \
+  --sku Standard_LRS \
+  --kind StorageV2
+
+az storage container create \
+  --name $CHECKPOINT_CONTAINER \
+  --account-name $STORAGE_ACCOUNT \
+  --auth-mode login
+
+STORAGE_CS=$(az storage account show-connection-string \
+  --name $STORAGE_ACCOUNT \
+  --resource-group $RG \
+  --query connectionString \
+  --output tsv)
+
+echo "✅ Storage Account créé : $STORAGE_ACCOUNT"
 ```
 
-## 📚 Points Clés à Retenir
+---
 
-✅ **Event Hubs = Streaming haute performance**
-- Millions d'événements/seconde
-- Rétention jusqu'à 90 jours
-- Compatible Kafka
+## ④ Azure Functions — Ingestion HTTP
 
-✅ **Partitions = Parallélisation**
-- Ordre garanti au sein d'une partition
-- Utiliser une partition key pour router intelligemment
+La Function joue le rôle d'**adaptateur** entre les clients HTTP et Event Hubs : elle valide, normalise et publie dans le stream.
 
-✅ **Consumer Groups = Vues indépendantes**
-- Plusieurs applications peuvent lire le même stream
-- Chaque consumer group a son propre offset
+### Créer la Function App
 
-✅ **Checkpoint = Reprise après panne**
-- Sauvegarde régulière de la position
-- Nécessite Azure Blob Storage
+```bash
+az functionapp create \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --consumption-plan-location $LOCATION \
+  --runtime python \
+  --runtime-version 3.11 \
+  --functions-version 4 \
+  --storage-account $STORAGE_ACCOUNT \
+  --os-type Linux
+
+echo "✅ Function App créée : $FUNC_APP"
+```
+
+### Configurer les variables d'application
+
+```bash
+az functionapp config appsettings set \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --settings \
+    "EVENT_HUB_CONNECTION_STRING=$EH_PRODUCER_CS" \
+    "EVENT_HUB_NAME=$EH_NAME"
+
+echo "✅ Variables configurées sur la Function App"
+```
+
+> **Code applicatif** : l'implémentation de la fonction (validation, normalisation, publication dans Event Hubs) sera couverte dans un module dédié. L'infrastructure est prête à recevoir le code.
+
+---
+
+## ⑤ Azure Cosmos DB
+
+Cosmos DB stocke les **agrégats produits par Stream Analytics** — pas les événements bruts (ceux-ci restent dans Event Hubs pendant la durée de rétention).
+
+```bash
+az cosmosdb create \
+  --name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --locations regionName=$LOCATION \
+  --default-consistency-level Session \
+  --enable-free-tier true
+
+echo "✅ Compte Cosmos DB créé : $COSMOS_ACCOUNT"
+
+az cosmosdb sql database create \
+  --account-name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --name $COSMOS_DB
+
+az cosmosdb sql container create \
+  --account-name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --database-name $COSMOS_DB \
+  --name $COSMOS_CONTAINER \
+  --partition-key-path "/entityId" \
+  --throughput 400
+
+COSMOS_KEY=$(az cosmosdb keys list \
+  --name $COSMOS_ACCOUNT \
+  --resource-group $RG \
+  --query primaryMasterKey \
+  --output tsv)
+
+echo "✅ Base de données et container créés"
+```
+
+> **Free tier** : 1000 RU/s et 25 GB gratuits par abonnement.
+
+---
+
+## ⑥ Azure Stream Analytics
+
+Stream Analytics consomme le **Consumer Group B** d'Event Hubs, agrège par fenêtre temporelle, et écrit dans Cosmos DB.
+
+### Créer le job
+
+```bash
+az stream-analytics job create \
+  --name $SA_JOB \
+  --resource-group $RG \
+  --location $LOCATION \
+  --output-error-policy Drop \
+  --events-out-of-order-policy Adjust \
+  --events-out-of-order-max-delay-in-seconds 5 \
+  --compatibility-level 1.2
+
+echo "✅ Stream Analytics job créé : $SA_JOB"
+```
+
+### Configurer l'entrée (Event Hubs)
+
+```bash
+SA_CONSUMER_KEY=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --name "policy-consumer" \
+  --query primaryKey \
+  --output tsv)
+
+az stream-analytics input create \
+  --job-name $SA_JOB \
+  --resource-group $RG \
+  --name "input-eventhub" \
+  --properties '{
+    "type": "Stream",
+    "datasource": {
+      "type": "Microsoft.ServiceBus/EventHub",
+      "properties": {
+        "eventHubName": "'"$EH_NAME"'",
+        "serviceBusNamespace": "'"$EH_NAMESPACE"'",
+        "consumerGroupName": "'"$EH_CG_SA"'",
+        "sharedAccessPolicyName": "policy-consumer",
+        "sharedAccessPolicyKey": "'"$SA_CONSUMER_KEY"'"
+      }
+    },
+    "serialization": { "type": "Json", "properties": { "encoding": "UTF8" } }
+  }'
+
+echo "✅ Entrée Event Hubs configurée"
+```
+
+### Configurer la sortie (Cosmos DB)
+
+```bash
+az stream-analytics output create \
+  --job-name $SA_JOB \
+  --resource-group $RG \
+  --name "output-cosmos" \
+  --properties '{
+    "datasource": {
+      "type": "Microsoft.Storage/DocumentDB",
+      "properties": {
+        "accountId": "'"$COSMOS_ACCOUNT"'",
+        "accountKey": "'"$COSMOS_KEY"'",
+        "database": "'"$COSMOS_DB"'",
+        "collectionNamePattern": "'"$COSMOS_CONTAINER"'",
+        "partitionKey": "entityId",
+        "documentId": "aggregateId"
+      }
+    }
+  }'
+
+echo "✅ Sortie Cosmos DB configurée"
+```
+
+### Requête de transformation
+
+```bash
+az stream-analytics transformation create \
+  --job-name $SA_JOB \
+  --resource-group $RG \
+  --name "transformation" \
+  --streaming-units 1 \
+  --query-statement "
+    SELECT
+        System.Timestamp()  AS windowEnd,
+        type                AS eventType,
+        entityId,
+        COUNT(*)            AS eventCount,
+        MIN(timestamp)      AS firstSeen,
+        MAX(timestamp)      AS lastSeen,
+        CONCAT(type, '-', entityId, '-',
+               CAST(System.Timestamp() AS nvarchar(max))) AS aggregateId
+    INTO [output-cosmos]
+    FROM [input-eventhub] TIMESTAMP BY timestamp
+    GROUP BY
+        type,
+        entityId,
+        TumblingWindow(minute, 1)
+  "
+
+echo "✅ Requête configurée"
+```
+
+> **TumblingWindow(minute, 1)** : agrège tous les événements du même type pour la même entité par fenêtre d'1 minute, sans overlap.
+
+### Démarrer le job
+
+```bash
+az stream-analytics job start \
+  --name $SA_JOB \
+  --resource-group $RG \
+  --output-start-mode LastOutputEventTime
+
+echo "✅ Stream Analytics démarré"
+```
+
+---
+
+## ⑦ Azure Event Grid
+
+Event Grid reçoit les événements du **change feed Cosmos DB** et les route vers les handlers — sans que le reste du pipeline ne le sache.
+
+### Créer un topic custom
+
+```bash
+az eventgrid topic create \
+  --name $EG_TOPIC \
+  --resource-group $RG \
+  --location $LOCATION
+
+EG_ENDPOINT=$(az eventgrid topic show \
+  --name $EG_TOPIC \
+  --resource-group $RG \
+  --query endpoint \
+  --output tsv)
+
+EG_KEY=$(az eventgrid topic key list \
+  --name $EG_TOPIC \
+  --resource-group $RG \
+  --query key1 \
+  --output tsv)
+
+echo "✅ Event Grid Topic créé : $EG_TOPIC"
+```
+
+### Créer une subscription
+
+```bash
+# Remplacez par votre endpoint de test (ex: https://webhook.site/votre-id)
+WEBHOOK_URL="https://webhook.site/votre-id-unique"
+
+az eventgrid event-subscription create \
+  --name $EG_SUBSCRIPTION \
+  --source-resource-id $(az eventgrid topic show \
+    --name $EG_TOPIC \
+    --resource-group $RG \
+    --query id \
+    --output tsv) \
+  --endpoint $WEBHOOK_URL \
+  --endpoint-type webhook
+
+echo "✅ Subscription Event Grid créée → $WEBHOOK_URL"
+```
+
+---
+
+## 🏗️ Méthode 2 — Bicep (Infrastructure as Code)
+
+> Bicep est le langage IaC natif d'Azure. **Un fichier, une commande** — Azure gère les dépendances entre ressources et les déploie dans le bon ordre automatiquement.
+
+### Créer le fichier `infra/main.bicep`
+
+```bash
+mkdir infra
+```
+
+Copiez le contenu suivant dans `infra/main.bicep` :
+
+```bicep
+@description('Suffixe unique pour les noms de ressources (ex: $RANDOM en bash)')
+param suffix string = uniqueString(resourceGroup().id)
+
+@description('Région Azure')
+param location string = resourceGroup().location
+
+@description('URL du webhook Event Grid (ex: https://webhook.site/votre-id)')
+param webhookUrl string
+
+// ──────────────────────────────────────────────────────────────────
+// ① Event Hubs — Bus de streaming central
+// ──────────────────────────────────────────────────────────────────
+
+resource ehNamespace 'Microsoft.EventHub/namespaces@2024-01-01' = {
+  name: 'evhns-workshop-${suffix}'
+  location: location
+  sku: { name: 'Standard', tier: 'Standard', capacity: 1 }
+}
+
+resource eventHub 'Microsoft.EventHub/namespaces/eventhubs@2024-01-01' = {
+  parent: ehNamespace
+  name: 'business-events'
+  properties: {
+    partitionCount: 4
+    retentionDescription: {
+      retentionTimeInHours: 168
+      cleanupPolicy: 'Delete'
+    }
+  }
+}
+
+resource cgApp 'Microsoft.EventHub/namespaces/eventhubs/consumergroups@2024-01-01' = {
+  parent: eventHub
+  name: 'cg-app'
+}
+
+resource cgAnalytics 'Microsoft.EventHub/namespaces/eventhubs/consumergroups@2024-01-01' = {
+  parent: eventHub
+  name: 'cg-analytics'
+}
+
+resource authProducer 'Microsoft.EventHub/namespaces/authorizationRules@2024-01-01' = {
+  parent: ehNamespace
+  name: 'policy-producer'
+  properties: { rights: ['Send'] }
+}
+
+resource authConsumer 'Microsoft.EventHub/namespaces/authorizationRules@2024-01-01' = {
+  parent: ehNamespace
+  name: 'policy-consumer'
+  properties: { rights: ['Listen'] }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// ② Storage — Checkpoints consommateurs + déploiement Functions
+// ──────────────────────────────────────────────────────────────────
+
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
+  name: 'stworkshop${suffix}'
+  location: location
+  sku: { name: 'Standard_LRS' }
+  kind: 'StorageV2'
+}
+
+resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource checkpointContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  parent: blobService
+  name: 'eh-checkpoints'
+  properties: { publicAccess: 'None' }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// ③ Azure Functions — Adaptateur HTTP → Event Hubs
+// ──────────────────────────────────────────────────────────────────
+
+resource hostingPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
+  name: 'asp-workshop-${suffix}'
+  location: location
+  sku: { name: 'Y1', tier: 'Dynamic' }
+  kind: 'linux'
+  properties: { reserved: true }
+}
+
+var storageCs = 'DefaultEndpointsProtocol=https;AccountName=${storageAccount.name};AccountKey=${storageAccount.listKeys().keys[0].value};EndpointSuffix=core.windows.net'
+
+resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
+  name: 'func-ingest-${suffix}'
+  location: location
+  kind: 'functionapp,linux'
+  properties: {
+    serverFarmId: hostingPlan.id
+    siteConfig: {
+      linuxFxVersion: 'Python|3.11'
+      appSettings: [
+        { name: 'AzureWebJobsStorage',         value: storageCs }
+        { name: 'FUNCTIONS_EXTENSION_VERSION',  value: '~4' }
+        { name: 'FUNCTIONS_WORKER_RUNTIME',     value: 'python' }
+        { name: 'EVENT_HUB_CONNECTION_STRING',  value: authProducer.listKeys().primaryConnectionString }
+        { name: 'EVENT_HUB_NAME',               value: eventHub.name }
+      ]
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// ④ Cosmos DB — Persistance des agrégats Stream Analytics
+// ──────────────────────────────────────────────────────────────────
+
+resource cosmosAccount 'Microsoft.DocumentDB/databaseAccounts@2024-05-15' = {
+  name: 'cosmos-workshop-${suffix}'
+  location: location
+  properties: {
+    databaseAccountOfferType: 'Standard'
+    enableFreeTier: true
+    consistencyPolicy: { defaultConsistencyLevel: 'Session' }
+    locations: [{ locationName: location, failoverPriority: 0, isZoneRedundant: false }]
+  }
+}
+
+resource cosmosDatabase 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases@2024-05-15' = {
+  parent: cosmosAccount
+  name: 'eda-db'
+  properties: { resource: { id: 'eda-db' } }
+}
+
+resource cosmosContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers@2024-05-15' = {
+  parent: cosmosDatabase
+  name: 'events'
+  properties: {
+    resource: {
+      id: 'events'
+      partitionKey: { paths: ['/entityId'], kind: 'Hash' }
+    }
+    options: { autoscaleSettings: { maxThroughput: 1000 } }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// ⑤ Stream Analytics — Agrégation TumblingWindow(1 min)
+// ──────────────────────────────────────────────────────────────────
+
+resource saJob 'Microsoft.StreamAnalytics/streamingjobs@2021-10-01-preview' = {
+  name: 'sa-workshop-${suffix}'
+  location: location
+  properties: {
+    sku: { name: 'Standard' }
+    eventsOutOfOrderPolicy: 'Adjust'
+    outputErrorPolicy: 'Stop'
+    eventsOutOfOrderMaxDelayInSeconds: 0
+  }
+}
+
+resource saInput 'Microsoft.StreamAnalytics/streamingjobs/inputs@2021-10-01-preview' = {
+  parent: saJob
+  name: 'input-eventhub'
+  properties: {
+    type: 'Stream'
+    datasource: {
+      type: 'Microsoft.EventHub/EventHub'
+      properties: {
+        serviceBusNamespace: ehNamespace.name
+        eventHubName: eventHub.name
+        consumerGroupName: cgAnalytics.name
+        authenticationMode: 'ConnectionString'
+        sharedAccessPolicyName: authConsumer.name
+        sharedAccessPolicyKey: authConsumer.listKeys().primaryKey
+      }
+    }
+    serialization: {
+      type: 'Json'
+      properties: { encoding: 'UTF8' }
+    }
+  }
+}
+
+resource saOutput 'Microsoft.StreamAnalytics/streamingjobs/outputs@2021-10-01-preview' = {
+  parent: saJob
+  name: 'output-cosmos'
+  properties: {
+    datasource: {
+      type: 'Microsoft.Storage/DocumentDB'
+      properties: {
+        accountId: cosmosAccount.name
+        accountKey: cosmosAccount.listKeys().primaryMasterKey
+        database: cosmosDatabase.name
+        collectionNamePattern: cosmosContainer.name
+        partitionKey: 'entityId'
+        documentId: 'windowEnd'
+      }
+    }
+  }
+}
+
+resource saTransformation 'Microsoft.StreamAnalytics/streamingjobs/transformations@2021-10-01-preview' = {
+  parent: saJob
+  name: 'Transformation'
+  properties: {
+    streamingUnits: 1
+    query: '''
+SELECT
+    type,
+    entityId,
+    COUNT(*) AS eventCount,
+    System.Timestamp() AS windowEnd
+INTO [output-cosmos]
+FROM [input-eventhub] TIMESTAMP BY timestamp
+GROUP BY type, entityId, TumblingWindow(minute, 1)
+    '''
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// ⑥ Event Grid — Routing réactif depuis Cosmos DB change feed
+// ──────────────────────────────────────────────────────────────────
+
+resource egTopic 'Microsoft.EventGrid/topics@2022-06-15' = {
+  name: 'egt-workshop-${suffix}'
+  location: location
+}
+
+resource egSubscription 'Microsoft.EventGrid/eventSubscriptions@2022-06-15' = {
+  name: 'egs-notification'
+  scope: egTopic
+  properties: {
+    destination: {
+      endpointType: 'WebHook'
+      properties: { endpointUrl: webhookUrl }
+    }
+    filter: { includedEventTypes: [] }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Outputs — récupérés après déploiement
+// ──────────────────────────────────────────────────────────────────
+
+output functionAppUrl    string = 'https://${functionApp.name}.azurewebsites.net/api/ingest'
+output functionAppName   string = functionApp.name
+output ehNamespaceName   string = ehNamespace.name
+output cosmosAccountName string = cosmosAccount.name
+output saJobName         string = saJob.name
+output egTopicEndpoint   string = egTopic.properties.endpoint
+```
+
+### Déployer
+
+```bash
+# 1. Créer le Resource Group
+az group create \
+  --name $RG \
+  --location $LOCATION
+
+# 2. Déployer le template Bicep
+az deployment group create \
+  --resource-group $RG \
+  --template-file infra/main.bicep \
+  --parameters \
+      suffix=$SUFFIX \
+      webhookUrl="https://webhook.site/votre-id-unique" \
+  --name "deploy-eda-workshop"
+
+echo "✅ Infrastructure déployée"
+```
+
+### Récupérer les outputs
+
+```bash
+az deployment group show \
+  --resource-group $RG \
+  --name "deploy-eda-workshop" \
+  --query "properties.outputs" \
+  --output json
+```
+
+### Démarrer le job Stream Analytics
+
+> Bicep crée le job mais ne peut pas le démarrer directement — Azure requiert une API séparée pour le passage en mode `Running`.
+
+```bash
+SA_JOB_NAME=$(az deployment group show \
+  --resource-group $RG \
+  --name "deploy-eda-workshop" \
+  --query "properties.outputs.saJobName.value" \
+  --output tsv)
+
+az stream-analytics job start \
+  --job-name $SA_JOB_NAME \
+  --resource-group $RG \
+  --output-start-mode JobStartTime
+
+echo "✅ Stream Analytics démarré : $SA_JOB_NAME"
+```
+
+> **Déploiement du code** : le code applicatif de la Function App sera déployé dans un module dédié, une fois l'implémentation écrite.
+
+---
+
+## ⑧ Validation de l'Infrastructure
+
+Une fois le déploiement terminé, vérifiez que toutes les ressources sont bien créées :
+
+```bash
+# Lister les ressources du Resource Group
+az resource list \
+  --resource-group $RG \
+  --output table
+```
+
+```bash
+# Vérifier le statut du job Stream Analytics
+az stream-analytics job show \
+  --name $SA_JOB \
+  --resource-group $RG \
+  --query "properties.jobState" \
+  --output tsv
+```
+
+```bash
+# Vérifier la Function App
+az functionapp show \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --query "state" \
+  --output tsv
+```
+
+L'infrastructure est validée quand toutes les ressources apparaissent avec le statut `Running` ou `Succeeded`.
+
+---
+
+## 📋 Récapitulatif des ressources déployées
+
+| Service | Rôle dans l'architecture |
+|---------|--------------------------|
+| Event Hubs Namespace + Event Hub | Bus de streaming central, 4 partitions, rétention 7j |
+| Consumer Group `cg-app` | Lecture temps réel (app consommatrice) |
+| Consumer Group `cg-analytics` | Lecture analytique (Stream Analytics) |
+| Storage Account | Checkpoints + déploiement Function |
+| Function App | Adaptateur HTTP → Event Hubs (validation + normalisation) |
+| Cosmos DB | Persistance des agrégats Stream Analytics |
+| Stream Analytics | Agrégation TumblingWindow(1 min) par type + entité |
+| Event Grid Topic | Routing réactif des événements depuis Cosmos DB |
+
+---
 
 ## ➡️ Prochaine Étape
 
-Passons maintenant à Azure Service Bus pour explorer la messagerie d'entreprise !
+L'infrastructure est en place. Dans le module suivant, on plonge dans les **concepts avancés d'Event Hubs** : partitionnement, backpressure, replay, et patterns de consommation.
 
-**[Module 3 : Azure Service Bus →](./03-service-bus.md)**
+**[Module 3 : Azure Event Hubs - Concepts Avancés →](./03-event-hubs-advanced.md)**
 
 ---
 
