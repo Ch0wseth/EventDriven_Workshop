@@ -15,76 +15,66 @@ Dans ce module, vous allez :
 > Architecture 100% services Azure natifs à la consommation ou free tier.
 
 ```mermaid
-flowchart LR
-    subgraph src["① Sources"]
-        C1["🖥️ Client Devices\nApps / Mobile"]
-        C2["⚙️ Applications\n& Services"]
+flowchart TD
+    subgraph src["① Sources d'événements"]
+        direction LR
+        C1["🖥️ Devices & Apps"]
+        C2["⚙️ Services Backend"]
     end
 
-    subgraph ing["② Ingestion"]
+    subgraph feed["② Ingestion"]
         FN["⚡ Azure Functions\nparsing / normalisation"]
-        EH["🚀 Azure Event Hubs\nfront door du pipeline"]
-        BLOB["📦 Blob Storage\ntelemetry brute"]
-        EG["🔀 Azure Event Grid\nrouting blob events"]
     end
 
-    subgraph tr["③ Transformation & Persistance"]
+    EH["🚀 Azure Event Hubs\n― ― ― ― ― ― ― ―\nHigh-throughput streaming\nPartitions • Consumer Groups\nRétention • Kafka compatible"]
+
+    subgraph cons["③ Consommateurs du stream"]
+        direction LR
+        APP["💻 App Consommatrice\nmicroservice / dashboard"]
         SA["🔧 Stream Analytics\nagrégation + fenêtres"]
-        DB["🗄️ Azure Cosmos DB\ntime-series analytics"]
+        DB["🗄️ Cosmos DB"]
     end
 
-    subgraph mon["④ Monitoring"]
-        AI["📊 Application Insights\ndashboards + métriques"]
-    end
-
-    subgraph ano["⑤ Anomaly Detection"]
-        MA["🔔 Azure Monitor Alerts\nseuils + patterns"]
-        AG["📣 Action Groups\nemail / webhook / Teams"]
+    subgraph react["④ Réactivité"]
+        EG["🔀 Event Grid\nrouting d'événements"]
+        H1["⚡ Function\nnotification"]
+        H2["🌐 Webhook\nsystème tiers"]
     end
 
     C1 -- "HTTP" --> FN
     C2 -- "AMQP / Kafka" --> EH
-    C2 -- "connecteurs" --> BLOB
-
     FN --> EH
-    BLOB --> EG
-    EG -- "trigger" --> FN
 
-    EH --> SA
+    EH -- "Consumer Group A" --> APP
+    EH -- "Consumer Group B" --> SA
     SA --> DB
 
-    DB -. "métriques" .-> AI
-    SA -. "logs" .-> AI
-
-    SA -- "anomalie détectée" --> MA
-    MA --> AG
+    DB -- "change feed" --> EG
+    EG --> H1
+    EG --> H2
 
     style src fill:#e8f4fd,stroke:#2196F3,color:#000
-    style ing fill:#fff8e1,stroke:#FF9800,color:#000
-    style tr fill:#e8f5e9,stroke:#4CAF50,color:#000
-    style mon fill:#f3e5f5,stroke:#9C27B0,color:#000
-    style ano fill:#fce4ec,stroke:#E91E63,color:#000
+    style feed fill:#fff8e1,stroke:#FF9800,color:#000
+    style cons fill:#e8f5e9,stroke:#4CAF50,color:#000
+    style react fill:#f3e5f5,stroke:#9C27B0,color:#000
 
     style C1 fill:#bbdefb,stroke:#1976D2,color:#000
     style C2 fill:#bbdefb,stroke:#1976D2,color:#000
     style FN fill:#ffe0b2,stroke:#F57C00,color:#000
-    style EH fill:#0078d4,stroke:#005a9e,color:#fff
-    style BLOB fill:#ffe0b2,stroke:#F57C00,color:#000
-    style EG fill:#7FBA00,stroke:#5a8600,color:#fff
+    style EH fill:#0078d4,stroke:#005a9e,color:#fff,font-weight:bold
+    style APP fill:#e8eaf6,stroke:#3949ab,color:#000
     style SA fill:#ff8c00,stroke:#cc6600,color:#fff
     style DB fill:#1e4d78,stroke:#0d2d4a,color:#fff
-    style AI fill:#7b2d9e,stroke:#5a1f75,color:#fff
-    style MA fill:#c62828,stroke:#8b0000,color:#fff
-    style AG fill:#e53935,stroke:#b71c1c,color:#fff
+    style EG fill:#7FBA00,stroke:#5a8600,color:#fff
+    style H1 fill:#ffe0b2,stroke:#F57C00,color:#000
+    style H2 fill:#e8eaf6,stroke:#3949ab,color:#000
 ```
 
 ### Flux de données
 
-1. **Instrumentation** — Clients et applications génèrent de la télémétrie via SDKs ou agents.
-2. **Ingestion** — Deux chemins : HTTP → Functions → Event Hubs, ou Blob Storage → Event Grid → Functions → Event Hubs.
-3. **Transformation & Persistance** — Stream Analytics transforme et agrège le stream, Cosmos DB stocke pour l'analytique temps réel.
-4. **Monitoring** — Application Insights centralise métriques, logs et dashboards.
-5. **Anomaly Detection** — Stream Analytics détecte les patterns anormaux et déclenche des alertes via Action Groups.
+1. **Ingestion** — Deux chemins vers Event Hubs : les services backend publient directement en AMQP/Kafka, les apps clients passent par une Azure Function qui normalise les données avant de les envoyer.
+2. **Consommateurs du stream** — Event Hubs expose plusieurs **Consumer Groups** indépendants : une app consommatrice lit le stream en temps réel (Group A), Stream Analytics agrège et persiste dans Cosmos DB (Group B).
+3. **Réactivité** — Le **change feed** de Cosmos DB déclenche Event Grid dès qu'une donnée est écrite. Event Grid route l'événement vers les handlers concernés (notification, système tiers) — sans que les consommateurs du stream n'aient à s'en préoccuper.
 
 ---
 
