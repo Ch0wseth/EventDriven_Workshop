@@ -588,14 +588,14 @@ resource cosmosContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/con
   properties: {
     resource: {
       id: 'events'
-      partitionKey: { paths: ['/entityId'], kind: 'Hash' }
+      partitionKey: { paths: ['/type'], kind: 'Hash' }
     }
     options: { autoscaleSettings: { maxThroughput: 1000 } }
   }
 }
 
 // ──────────────────────────────────────────────────────────────────
-// ⑤ Stream Analytics — Agrégation TumblingWindow(1 min)
+// ⑥ Stream Analytics — Agrégation TumblingWindow(5 min)
 // ──────────────────────────────────────────────────────────────────
 
 resource saJob 'Microsoft.StreamAnalytics/streamingjobs@2021-10-01-preview' = {
@@ -611,7 +611,7 @@ resource saJob 'Microsoft.StreamAnalytics/streamingjobs@2021-10-01-preview' = {
 
 resource saInput 'Microsoft.StreamAnalytics/streamingjobs/inputs@2021-10-01-preview' = {
   parent: saJob
-  name: 'input-eventhub'
+  name: 'eh-input'
   properties: {
     type: 'Stream'
     datasource: {
@@ -634,7 +634,7 @@ resource saInput 'Microsoft.StreamAnalytics/streamingjobs/inputs@2021-10-01-prev
 
 resource saOutput 'Microsoft.StreamAnalytics/streamingjobs/outputs@2021-10-01-preview' = {
   parent: saJob
-  name: 'output-cosmos'
+  name: 'cosmos-output'
   properties: {
     datasource: {
       type: 'Microsoft.Storage/DocumentDB'
