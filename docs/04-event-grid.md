@@ -124,57 +124,33 @@ Le topic existe déjà (module 02). On ajoute maintenant des abonnements **spéc
 graph LR
     T["$EG_TOPIC\negt-workshop-xxx"]
 
-    T -->|"eventType = EDA.Aggregate.*"| S1["sub-all-aggregates\n→ Function logging"]
-    T -->|"eventType = EDA.Alert.*"| S2["sub-alerts\n→ Function notification"]
-    T -->|"tous"| S3["sub-external\n→ Webhook"]
+    T -->|"eventType = EDA.Aggregate.*"| S1["sub-aggregates\n→ webhook.site (test)"]
+    T -->|"eventType = EDA.Alert.*"| S2["sub-alerts\n→ webhook.site (test)"]
 
     style T fill:#7FBA00,color:#fff
 ```
 
-### Créer un abonnement — Function Azure
+### Abonnement vers la Function Azure
 
-> ⚠️ La Function `EventGridHandler` est implémentée en section ③. Déployez-la d'abord (`func azure functionapp publish $FUNC_APP`) avant d'exécuter le bloc suivant.
-
-```bash
-# Récupérer l'ID de la Function App déployée en module 02
-FUNC_ID=$(az functionapp function show \
-  --name $FUNC_APP \
-  --resource-group $RG \
-  --function-name EventGridHandler \
-  --query id \
-  --output tsv)
-
-# Abonnement : tous les agrégats → Function de logging
-az eventgrid event-subscription create \
-  --name "sub-all-aggregates" \
-  --source-resource-id $(az eventgrid topic show \
-    --name $EG_TOPIC \
-    --resource-group $RG \
-    --query id --output tsv) \
-  --endpoint-type azurefunction \
-  --endpoint $FUNC_ID \
-  --included-event-types "EDA.Aggregate.Created"
-
-echo "✅ Abonnement créé : sub-all-aggregates → Function"
-```
+> 📌 Le branchement de l'abonnement Event Grid sur la Function `EventGridHandler` est réalisé dans le **module 06 — lab final**, une fois la Function déployée avec l'ensemble du pipeline.
 
 ### Créer un abonnement — Webhook (test)
 
 ```bash
-# Endpoint de test (remplacez par votre URL webhook.site)
+# Endpoint de test — générez votre URL sur https://webhook.site
 WEBHOOK_URL="https://webhook.site/votre-id-unique"
 
 az eventgrid event-subscription create \
-  --name "sub-external" \
+  --name "sub-aggregates" \
   --source-resource-id $(az eventgrid topic show \
     --name $EG_TOPIC \
     --resource-group $RG \
     --query id --output tsv) \
   --endpoint-type webhook \
   --endpoint $WEBHOOK_URL \
-  --included-event-types "EDA.Alert.PaymentFailed"
+  --included-event-types "EDA.Aggregate.Created"
 
-echo "✅ Abonnement créé : sub-external → Webhook (alertes paiement)"
+echo "✅ Abonnement créé : sub-aggregates → Webhook"
 ```
 
 ### Filtres avancés
@@ -182,7 +158,7 @@ echo "✅ Abonnement créé : sub-external → Webhook (alertes paiement)"
 ```bash
 # Filtrer par préfixe de subject
 az eventgrid event-subscription create \
-  --name "sub-orders-only" \
+  --name "sub-alerts" \
   --source-resource-id $(az eventgrid topic show \
     --name $EG_TOPIC \
     --resource-group $RG \
@@ -373,113 +349,13 @@ public class BatchPublisher {
 
 ---
 
-## ③ Azure Function Java déclenchée par Event Grid
-
-Cette Function reçoit les événements routés par Event Grid et les traite — logging, notification, appel externe.
-
-### Trigger Event Grid dans une Azure Function Java
-
-```java
-package com.example.eda;
-
-import com.microsoft.azure.functions.*;
-import com.microsoft.azure.functions.annotation.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
-
-import java.util.Map;
-import java.util.logging.Logger;
-
-public class EventGridHandler {
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    @FunctionName("EventGridHandler")
-    public void run(
-        @EventGridTrigger(name = "event") String eventGridEvent,
-        final ExecutionContext context
-    ) {
-        Logger log = context.getLogger();
-
-        try {
-            // Parser l'enveloppe Event Grid
-            Map<?, ?> envelope = MAPPER.readValue(eventGridEvent, Map.class);
-
-            String eventType = (String) envelope.get("eventType");
-            String subject   = (String) envelope.get("subject");
-            String eventId   = (String) envelope.get("id");
-            Map<?, ?> data   = (Map<?, ?>) envelope.get("data");
-
-            log.info(String.format("📨 Event Grid reçu [%s] : %s", eventType, subject));
-
-            // Router par type d'événement
-            switch (eventType) {
-                case "EDA.Aggregate.Created"   -> handleAggregate(data, log);
-                case "EDA.Alert.PaymentFailed" -> handlePaymentAlert(data, log);
-                default -> log.info("ℹ️  Type non géré : " + eventType);
-            }
-
-            log.info("✅ Événement traité : " + eventId);
-
-        } catch (Exception ex) {
-            // Event Grid retentera si la Function lève une exception
-            // → ne pas avaler les exceptions critiques
-            log.severe("❌ Erreur traitement : " + ex.getMessage());
-            throw new RuntimeException(ex);
-        }
-    }
-
-    private void handleAggregate(Map<?, ?> data, Logger log) {
-        String entityId  = (String) data.get("entityId");
-        String type      = (String) data.get("type");
-        int    count     = ((Number) data.get("eventCount")).intValue();
-
-        log.info(String.format(
-            "📊 Agrégat : %s / %s — %d événements dans la fenêtre",
-            type, entityId, count
-        ));
-
-        // Ex : mise à jour d'un dashboard, envoi d'une notification push
-    }
-
-    private void handlePaymentAlert(Map<?, ?> data, Logger log) {
-        String entityId = (String) data.get("entityId");
-        String reason   = (String) data.get("reason");
-
-        log.warning(String.format("🚨 Alerte paiement : %s — %s", entityId, reason));
-
-        // Ex : appel à un service de notification (email, SMS, Teams)
-    }
-}
-```
-
-### Idempotence — gérer les livraisons en double
-
-Event Grid peut livrer le même événement **deux fois** en cas de retry. La Function doit être idempotente :
-
-```java
-// Anti-pattern : opération non idempotente
-private void handleAggregate(Map<?, ?> data, Logger log) {
-    db.insert(data);  // ❌ Erreur si l'eventId existe déjà
-}
-
-// Pattern correct : upsert sur l'ID de l'événement
-private void handleAggregate(Map<?, ?> data, String eventId, Logger log) {
-    if (db.exists(eventId)) {
-        log.info("Événement déjà traité, ignoré : " + eventId);
-        return;  // ✅ Idempotent
-    }
-    db.upsert(eventId, data);
-}
-```
-
----
-
-## ④ Tester le Pipeline de Bout en Bout
+## ③ Tester le Pipeline
 
 ### Publier un événement de test via CLI
 
+> Les événements arrivent sur `webhook.site` — vérifiez dans l'interface que la livraison est effective.
+
 ```bash
-# Publier directement dans le topic (test sans Cosmos DB)
 az eventgrid event publish \
   --topic-name $EG_TOPIC \
   --resource-group $RG \
@@ -514,16 +390,10 @@ az monitor metrics list \
   --output table
 ```
 
-### Logs de la Function
-
-```bash
-# Suivre les logs en temps réel
-func azure functionapp logstream $FUNC_APP
-```
 
 ---
 
-## ⑤ Retry et Dead-lettering
+## ④ Retry et Dead-lettering
 
 ### Comportement de retry par défaut
 
@@ -563,7 +433,7 @@ echo "✅ Dead-lettering configuré → $STORAGE_ACCOUNT/eg-dead-letters"
 
 ---
 
-## ⑥ Monitoring
+## ⑤ Monitoring
 
 ### Métriques clés à surveiller
 
@@ -594,7 +464,7 @@ AzureMetrics
 
 ---
 
-## ⑦ Best Practices
+## ⑥ Best Practices
 
 | ✅ À faire | ❌ À éviter |
 |------------|-------------|
