@@ -6,7 +6,6 @@ const modules = [
     { id: '01-azure-event-services', icon: '☁️', title: 'Services Azure Event-Driven', file: '/docs/01-azure-event-services.md' },
     { id: '02-event-hubs', icon: '⚡', title: 'Déploiement de l\'Architecture', file: '/docs/02-event-hubs.md' },
     { id: '03-event-hubs-advanced', icon: '🚀', title: 'Event Hubs - Avancé', file: '/docs/03-event-hubs-advanced.md' },
-    { id: '03b-event-hubs-deepdive', icon: '🔬', title: 'Event Hubs - Deep Dive', file: '/docs/03b-event-hubs-deepdive.md', badge: 'EXPERT' },
     { id: '04-event-grid', icon: '🔔', title: 'Event Grid', file: '/docs/04-event-grid.md' },
     { id: '06-hands-on-lab', icon: '🛠️', title: 'Lab Final - Pipeline Complet', file: '/docs/06-hands-on-lab.md' },
     { id: '07-foundry-event-driven', icon: '🤖', title: 'Foundry Agents + Event-Driven', file: '/docs/07-foundry-event-driven.md', badge: 'NEW' },
