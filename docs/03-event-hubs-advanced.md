@@ -50,6 +50,43 @@ Ajoutez dans votre `pom.xml` :
 
 ---
 
+## 🔑 Variables d'environnement
+
+Ce module utilise les ressources déployées dans le **module 02**. Récupérez les variables nécessaires avant de lancer le code Java :
+
+```bash
+# Namespace et Event Hub (définis dans le module 02)
+export EH_NAME="business-events"
+export EH_NAMESPACE="evhns-workshop-$SUFFIX"
+
+# policy-producer → droit Send uniquement
+export EH_PRODUCER_CS=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --name "policy-producer" \
+  --query primaryConnectionString \
+  --output tsv)
+
+# policy-consumer → droit Listen uniquement
+export EH_CONSUMER_CS=$(az eventhubs namespace authorization-rule keys list \
+  --namespace-name $EH_NAMESPACE \
+  --resource-group $RG \
+  --name "policy-consumer" \
+  --query primaryConnectionString \
+  --output tsv)
+
+# Storage Account pour les checkpoints consommateurs
+export STORAGE_CS=$(az storage account show-connection-string \
+  --name $STORAGE_ACCOUNT \
+  --resource-group $RG \
+  --query connectionString \
+  --output tsv)
+```
+
+> **Principe du moindre privilège** : les producteurs utilisent `EH_PRODUCER_CS` (Send only), les consommateurs utilisent `EH_CONSUMER_CS` (Listen only). Jamais la même variable pour les deux.
+
+---
+
 ## ① Partitionnement en Profondeur
 
 ### Concept clé
@@ -111,7 +148,7 @@ import java.util.Map;
 
 public class SimpleProducer {
 
-    private static final String CONNECTION_STRING = System.getenv("EH_CONNECTION_STRING");
+    private static final String CONNECTION_STRING = System.getenv("EH_PRODUCER_CS"); // Send only
     private static final String EVENTHUB_NAME     = System.getenv("EH_NAME");
     private static final ObjectMapper MAPPER       = new ObjectMapper();
 
@@ -225,7 +262,7 @@ public class BatchProducer {
 
     public static void main(String[] args) throws Exception {
         EventHubProducerClient producer = new EventHubClientBuilder()
-            .connectionString(System.getenv("EH_CONNECTION_STRING"),
+            .connectionString(System.getenv("EH_PRODUCER_CS"),
                               System.getenv("EH_NAME"))
             .buildProducerClient();
 
@@ -267,7 +304,7 @@ public class AsyncProducer {
 
     public static void main(String[] args) throws InterruptedException {
         EventHubProducerAsyncClient producer = new EventHubClientBuilder()
-            .connectionString(System.getenv("EH_CONNECTION_STRING"),
+            .connectionString(System.getenv("EH_PRODUCER_CS"),
                               System.getenv("EH_NAME"))
             .buildAsyncProducerClient();
 
@@ -378,11 +415,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class ResilientConsumer {
 
-    private static final String EH_CONNECTION_STRING      = System.getenv("EH_CONNECTION_STRING");
-    private static final String EH_NAME                   = System.getenv("EH_NAME");
-    private static final String STORAGE_CONNECTION_STRING = System.getenv("STORAGE_CONNECTION_STRING");
-    private static final String CHECKPOINT_CONTAINER      = "eh-checkpoints";
-    private static final String CONSUMER_GROUP            = "cg-app";
+    private static final String EH_CONSUMER_CS       = System.getenv("EH_CONSUMER_CS"); // Listen only
+    private static final String EH_NAME               = System.getenv("EH_NAME");
+    private static final String STORAGE_CS             = System.getenv("STORAGE_CS");
+    private static final String CHECKPOINT_CONTAINER  = "eh-checkpoints";  // $CHECKPOINT_CONTAINER du module 02
+    private static final String CONSUMER_GROUP        = "cg-app";           // $EH_CG_APP du module 02
 
     private static final ObjectMapper MAPPER   = new ObjectMapper();
     private static final AtomicInteger COUNTER = new AtomicInteger(0);
@@ -391,13 +428,13 @@ public class ResilientConsumer {
 
         // ① Blob Storage pour les checkpoints
         BlobContainerAsyncClient blobClient = new BlobContainerClientBuilder()
-            .connectionString(STORAGE_CONNECTION_STRING)
+            .connectionString(STORAGE_CS)
             .containerName(CHECKPOINT_CONTAINER)
             .buildAsyncClient();
 
         // ② EventProcessorClient
         EventProcessorClient processor = new EventProcessorClientBuilder()
-            .connectionString(EH_CONNECTION_STRING, EH_NAME)
+            .connectionString(EH_CONSUMER_CS, EH_NAME)
             .consumerGroup(CONSUMER_GROUP)
             .checkpointStore(new BlobCheckpointStore(blobClient))
             .processEvent(ResilientConsumer::processEvent)
@@ -597,7 +634,7 @@ public class ReplayConsumer {
     public static void main(String[] args) throws Exception {
         // Relire les 6 dernières heures
         replayWindow(
-            System.getenv("EH_CONNECTION_STRING"),
+            System.getenv("EH_CONSUMER_CS"),
             System.getenv("EH_NAME"),
             "$Default",
             Instant.now().minus(Duration.ofHours(6)),
@@ -632,8 +669,9 @@ import java.util.Properties;
 
 public class KafkaConfigFactory {
 
-    private static final String NAMESPACE         = System.getenv("EH_NAMESPACE");
-    private static final String CONNECTION_STRING = System.getenv("EH_CONNECTION_STRING");
+    private static final String NAMESPACE       = System.getenv("EH_NAMESPACE");
+    private static final String EH_PRODUCER_CS = System.getenv("EH_PRODUCER_CS"); // Send only
+    private static final String EH_CONSUMER_CS = System.getenv("EH_CONSUMER_CS"); // Listen only
 
     public static Properties producerConfig() {
         Properties props = new Properties();
@@ -643,7 +681,7 @@ public class KafkaConfigFactory {
         props.put("sasl.jaas.config",
             "org.apache.kafka.common.security.plain.PlainLoginModule required " +
             "username=\"$ConnectionString\" " +
-            "password=\"" + CONNECTION_STRING + "\";");
+            "password=\"" + EH_PRODUCER_CS + "\";");
 
         props.put("key.serializer",   "org.apache.kafka.common.serialization.StringSerializer");
         props.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
@@ -665,7 +703,7 @@ public class KafkaConfigFactory {
         props.put("sasl.jaas.config",
             "org.apache.kafka.common.security.plain.PlainLoginModule required " +
             "username=\"$ConnectionString\" " +
-            "password=\"" + CONNECTION_STRING + "\";");
+            "password=\"" + EH_CONSUMER_CS + "\";");
 
         props.put("group.id",           groupId);
         props.put("auto.offset.reset",  "earliest");
@@ -912,7 +950,7 @@ public class CaptureReader {
 
     public static void main(String[] args) throws IOException {
         readCapturedEvents(
-            System.getenv("STORAGE_CONNECTION_STRING"),
+            System.getenv("STORAGE_CS"),
             "eh-capture",
             "my-namespace/business-events/0/2026/04/25/"
         );
