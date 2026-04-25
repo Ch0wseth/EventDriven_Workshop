@@ -1,12 +1,92 @@
 # Module 1 : Services Azure pour le Streaming Event-Driven
 
-
 ## 🎯 Objectifs
 
 Dans ce module, vous allez :
-- Découvrir Azure Event Hubs pour le streaming haute performance
-- Comprendre Azure Event Grid pour l'intégration événementielle
-- Apprendre à choisir entre les deux selon votre cas d'usage
+- Découvrir une architecture de référence event-driven complète sur Azure
+- Comprendre le rôle de chaque service dans le pipeline
+- Choisir les bons services selon votre cas d'usage et votre budget
+- Maîtriser Event Hubs et Event Grid en profondeur
+
+---
+
+## 🏗️ Architecture de Référence : Système Observable Event-Driven
+
+> Architecture 100% services Azure natifs à la consommation ou free tier.
+
+```mermaid
+flowchart LR
+    subgraph src["① Sources"]
+        C1["🖥️ Client Devices\nApps / Mobile"]
+        C2["⚙️ Applications\n& Services"]
+    end
+
+    subgraph ing["② Ingestion"]
+        FN["⚡ Azure Functions\nparsing / normalisation"]
+        EH["🚀 Azure Event Hubs\nfront door du pipeline"]
+        BLOB["📦 Blob Storage\ntelemetry brute"]
+        EG["🔀 Azure Event Grid\nrouting blob events"]
+    end
+
+    subgraph tr["③ Transformation & Persistance"]
+        SA["🔧 Stream Analytics\nagrégation + fenêtres"]
+        DB["🗄️ Azure Cosmos DB\ntime-series analytics"]
+    end
+
+    subgraph mon["④ Monitoring"]
+        AI["📊 Application Insights\ndashboards + métriques"]
+    end
+
+    subgraph ano["⑤ Anomaly Detection"]
+        MA["🔔 Azure Monitor Alerts\nseuils + patterns"]
+        AG["📣 Action Groups\nemail / webhook / Teams"]
+    end
+
+    C1 -- "HTTP" --> FN
+    C2 -- "AMQP / Kafka" --> EH
+    C2 -- "connecteurs" --> BLOB
+
+    FN --> EH
+    BLOB --> EG
+    EG -- "trigger" --> FN
+
+    EH --> SA
+    SA --> DB
+
+    DB -. "métriques" .-> AI
+    SA -. "logs" .-> AI
+
+    SA -- "anomalie détectée" --> MA
+    MA --> AG
+
+    style src fill:#e8f4fd,stroke:#2196F3,color:#000
+    style ing fill:#fff8e1,stroke:#FF9800,color:#000
+    style tr fill:#e8f5e9,stroke:#4CAF50,color:#000
+    style mon fill:#f3e5f5,stroke:#9C27B0,color:#000
+    style ano fill:#fce4ec,stroke:#E91E63,color:#000
+
+    style C1 fill:#bbdefb,stroke:#1976D2,color:#000
+    style C2 fill:#bbdefb,stroke:#1976D2,color:#000
+    style FN fill:#ffe0b2,stroke:#F57C00,color:#000
+    style EH fill:#0078d4,stroke:#005a9e,color:#fff
+    style BLOB fill:#ffe0b2,stroke:#F57C00,color:#000
+    style EG fill:#7FBA00,stroke:#5a8600,color:#fff
+    style SA fill:#ff8c00,stroke:#cc6600,color:#fff
+    style DB fill:#1e4d78,stroke:#0d2d4a,color:#fff
+    style AI fill:#7b2d9e,stroke:#5a1f75,color:#fff
+    style MA fill:#c62828,stroke:#8b0000,color:#fff
+    style AG fill:#e53935,stroke:#b71c1c,color:#fff
+```
+
+### Flux de données
+
+1. **Instrumentation** — Clients et applications génèrent de la télémétrie via SDKs ou agents.
+2. **Ingestion** — Deux chemins : HTTP → Functions → Event Hubs, ou Blob Storage → Event Grid → Functions → Event Hubs.
+3. **Transformation & Persistance** — Stream Analytics transforme et agrège le stream, Cosmos DB stocke pour l'analytique temps réel.
+4. **Monitoring** — Application Insights centralise métriques, logs et dashboards.
+5. **Anomaly Detection** — Stream Analytics détecte les patterns anormaux et déclenche des alertes via Action Groups.
+
+---
 
 ## 🌐 Azure Event-Driven : Focus Streaming
 
@@ -103,74 +183,6 @@ graph TB
 - ❌ Besoin de dead-letter queue sophistiquée
 - ❌ Budget très limité pour faible volume
 
-## 🟢 Azure Service Bus
-
-### Qu'est-ce que c'est ?
-
-**Service Bus** est un **message broker d'entreprise** avec support des transactions, sessions, et patterns avancés de messagerie.
-
-### Caractéristiques Clés
-
-- 💼 **Enterprise-grade** : Transactions, sessions, duplicate detection
-- 📬 **Queues & Topics** : Point-à-point ou pub/sub
-- 🔒 **Sessions** : Ordre garanti pour un groupe de messages
-- ⚰️ **Dead Letter Queue** : Gestion automatique des messages en erreur
-- 🔁 **Scheduled Messages** : Envoi différé
-
-### Concepts Principaux
-
-#### Queues (Files d'attente)
-Communication **point-à-point** entre un producteur et un consommateur.
-
-```
-Producer ──> [Queue] ──> Consumer
-                ↓
-        (autres consumers en attente)
-```
-
-#### Topics & Subscriptions
-Communication **publish/subscribe** : un message vers plusieurs consommateurs.
-
-```
-Publisher ──> [Topic] ──┬──> Subscription A ──> Consumer A
-                        ├──> Subscription B ──> Consumer B
-                        └──> Subscription C ──> Consumer C
-```
-
-### Cas d'Usage
-
-```
-✅ Commandes e-commerce (avec transactions)
-✅ Workflow de traitement de documents
-✅ Communication inter-microservices
-✅ Intégration de systèmes legacy
-✅ Messages nécessitant un ordre strict
-```
-
-### Exemple de Flux
-
-```
-[Web App] ──> [Service Bus Topic] ──┬──> [Email Service]
-   Order           "OrderCreated"    ├──> [Inventory Service]
-                                     ├──> [Payment Service]
-                                     └──> [Analytics Service]
-```
-
-### Quand l'utiliser ?
-
-- ✅ Besoin de transactions
-- ✅ Ordre strict requis (sessions)
-- ✅ Dead-letter queue nécessaire
-- ✅ Duplicate detection importante
-- ✅ Messages de commande/instruction
-- ✅ Intégration entre microservices
-
-### Quand ne PAS l'utiliser ?
-
-- ❌ Très haut débit (> 100K msgs/sec)
-- ❌ Événements simples sans garanties
-- ❌ Rétention longue (> 14 jours)
-- ❌ Budget très limité
 
 ## 🟣 Azure Event Grid - Intégration Légère
 
@@ -212,7 +224,6 @@ Publisher ──> [Topic] ──┬──> Subscription A ──> Consumer A
 - 🔗 Logic Apps
 - 🌐 Webhooks
 - 🚀 Event Hubs (bridging)
-- 📬 Service Bus Queue/Topic
 
 ### Cas d'Usage Event Grid
 
@@ -356,9 +367,11 @@ Event Hubs et Event Grid peuvent être complémentaires !
 ## 📚 Ressources
 
 - 📘 **[Event-Driven Architecture Style](https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/event-driven)** - Guide Microsoft officiel
-- [Choisir entre les services de messagerie Azure](https://docs.microsoft.com/azure/event-grid/compare-messaging-services)
-- [Azure Event Hubs Documentation](https://docs.microsoft.com/azure/event-hubs/)
-- [Azure Event Grid Documentation](https://docs.microsoft.com/azure/event-grid/)
+- 📘 **[Choisir entre les services de messagerie Azure](https://learn.microsoft.com/en-us/azure/event-grid/compare-messaging-services)** - Comparatif officiel
+- 📘 **[Azure Event Hubs Documentation](https://docs.microsoft.com/azure/event-hubs/)**
+- 📘 **[Azure Event Grid Documentation](https://docs.microsoft.com/azure/event-grid/)**
+- 📘 **[Azure Stream Analytics Documentation](https://learn.microsoft.com/en-us/azure/stream-analytics/)**
+- 📘 **[Azure Cosmos DB Free Tier](https://learn.microsoft.com/en-us/azure/cosmos-db/free-tier)**
 
 ## ➡️ Prochaine Étape
 

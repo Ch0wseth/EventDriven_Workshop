@@ -245,33 +245,37 @@ Le consommateur fetch les données nécessaires via API/DB.
 
 ---
 
-## 🏗️ Composants d'une Architecture Event-Driven sur Azure
+## 🏗️ Les Services de Messaging Azure
+
+Azure propose trois services de messagerie complémentaires couvrant l'ensemble du spectre event-driven : streaming haute volumétrie, messagerie d'entreprise fiable, et routage réactif d'événements.
 
 ```mermaid
 graph TB
-    subgraph Producers
+    subgraph Producers["Producteurs"]
         A[Web App / API]
         B[IoT Devices]
         C[Backend Services]
+        K[Azure Resources]
     end
 
-    subgraph "Event Ingestion"
-        D[Azure Event Hubs<br/>High-throughput streaming]
-        E[Azure Service Bus<br/>Reliable messaging]
-        F[Azure Event Grid<br/>Reactive pub/sub]
+    subgraph Ingestion["Services de Messaging"]
+        D["🔵 Azure Event Hubs\nStreaming • Kafka • Capture"]
+        E["🟠 Azure Service Bus\nQueues • Topics • Sessions"]
+        F["🟢 Azure Event Grid\nRouting • MQTT • Pull/Push"]
     end
 
-    subgraph Consumers
+    subgraph Consumers["Consommateurs"]
         G[Azure Functions]
         H[Stream Analytics]
         I[Logic Apps]
         J[Custom Services]
     end
 
-    A -->|millions/sec| D
-    B -->|IoT telemetry| D
-    C -->|business events| E
-    C -->|notifications| F
+    A -->|"millions/sec\nAMQP / Kafka"| D
+    B -->|"IoT telemetry"| D
+    C -->|"business events\ntransactions"| E
+    C -->|"notifications"| F
+    K -->|"resource events\n(blob, VM...)"| F
 
     D --> G
     D --> H
@@ -280,18 +284,138 @@ graph TB
     F --> G
     F --> J
 
-    style D fill:#e1f5ff
-    style E fill:#e1f5ff
-    style F fill:#e1f5ff
+    style D fill:#dbeafe,stroke:#2563eb
+    style E fill:#fef3c7,stroke:#d97706
+    style F fill:#dcfce7,stroke:#16a34a
 ```
 
-### Quand utiliser quel service Azure ?
+---
 
-| Service | Cas d'usage | Throughput | Garantie |
-|---------|-------------|------------|---------|
-| **Event Hubs** | Streaming haute volumétrie, telemetrie | Millions/s | At-least-once, replayable |
-| **Service Bus** | Messages business, transactions | Milliers/s | At-least-once / exactly-once (sessions) |
-| **Event Grid** | Notifications, réactivité cloud | Tens of millions/day | At-least-once |
+### 🔵 Azure Event Hubs — Big Data Streaming
+
+**Event Hubs** est la plateforme de **streaming de données à très haute volumétrie** d'Azure. Conçue pour ingérer des millions d'événements par seconde, elle constitue la porte d'entrée des pipelines de données temps réel.
+
+**Caractéristiques clés :**
+- 📦 **Partitionnement** : les événements sont distribués sur N partitions, garantissant ordre et parallélisme
+- ⏱️ **Rétention configurable** : de 1 à 90 jours (Standard/Premium), replay possible
+- 🐘 **Compatible Apache Kafka** : les applications Kafka existantes se connectent sans modification de code
+- 📸 **Event Hubs Capture** : archivage automatique vers Azure Blob Storage ou ADLS Gen2 (Avro/Parquet)
+- 🔌 **Protocol** : AMQP 1.0, Apache Kafka, HTTPS
+
+**Modèle de consommation :**
+```
+[Producers] ──> [Event Hubs Namespace]
+                       │
+              ┌────────┴────────┐
+         Partition 0      Partition N
+              │                │
+    [Consumer Group A]   [Consumer Group B]
+    (Stream Analytics)  (Azure Functions)
+```
+
+**Quand l'utiliser :**
+- ✅ Télémétrie IoT, logs applicatifs, clickstream
+- ✅ Pipelines de données temps réel (ML, analytics)
+- ✅ Migration depuis Apache Kafka
+- ✅ Ingestion de données >100K événements/sec
+
+**Quand ne PAS l'utiliser :**
+- ❌ Messages nécessitant une confirmation de traitement individuel
+- ❌ Workflows transactionnels avec dead-letter queue
+- ❌ Communication point-à-point entre microservices
+
+---
+
+### 🟠 Azure Service Bus — Enterprise Messaging
+
+**Service Bus** est le **message broker d'entreprise** d'Azure. Il garantit la livraison fiable des messages avec support des transactions, sessions, et patterns avancés de messagerie — même en cas de panne consommateur.
+
+**Caractéristiques clés :**
+- 📬 **Queues** : communication point-à-point, un consommateur à la fois
+- 📣 **Topics & Subscriptions** : pub/sub avec filtres, un message vers N abonnés
+- 🔒 **Sessions** : ordre strict garanti pour un groupe de messages (ex: commandes d'un même client)
+- ⚰️ **Dead Letter Queue (DLQ)** : isolation automatique des messages en erreur pour analyse
+- 🔁 **Retry policy** : redelivery automatique configurable
+- ✅ **Transactions** : regrouper plusieurs opérations en une seule unité atomique
+- 🕐 **Scheduled Messages** : envoi différé
+
+**Modèles supportés :**
+```
+Queue (point-à-point) :
+Producer ──> [Queue] ──> Consumer (un seul à la fois)
+
+Topic (pub/sub avec filtres) :
+Publisher ──> [Topic] ──┬──> Subscription A (filtre: région=EU) ──> Consumer A
+                        ├──> Subscription B (filtre: montant>1000) ──> Consumer B
+                        └──> Subscription C (tous) ──> Consumer C
+```
+
+**Quand l'utiliser :**
+- ✅ Commandes e-commerce, traitement de paiements
+- ✅ Workflows inter-microservices avec garanties transactionnelles
+- ✅ Intégration de systèmes legacy (SAP, ERP)
+- ✅ Messages nécessitant un ordre strict ou une DLQ
+- ✅ Saga pattern, compensation de transactions distribuées
+
+**Quand ne PAS l'utiliser :**
+- ❌ Très haut débit (>100K msgs/sec) → préférer Event Hubs
+- ❌ Événements éphémères sans garanties → préférer Event Grid
+- ❌ Rétention longue durée (>14 jours)
+
+---
+
+### 🟢 Azure Event Grid — Reactive Event Routing
+
+**Event Grid** est le service de **routage d'événements réactif** d'Azure. Il connecte les sources d'événements aux handlers avec un modèle push ou pull, et supporte nativement les événements de ressources Azure.
+
+**Caractéristiques clés :**
+- ⚡ **Intégration native Azure** : les ressources Azure (Blob Storage, Resource Groups, VMs...) publient automatiquement leurs événements
+- 🔀 **Filtrage avancé** : routage par type d'événement, sujet, propriétés custom
+- 📡 **MQTT Broker** (v2) : support du protocole MQTT 3.1.1 et 5.0 pour l'IoT
+- 🔄 **Pull & Push delivery** : le consommateur peut tirer les événements (pull) ou les recevoir en push
+- 📊 **Namespaces** : isolation multi-tenant avec topics et subscriptions propres
+- 🌐 **CloudEvents** : standard CNCF supporté nativement
+
+**Sources d'événements natives :**
+```
+Azure Blob Storage  ──┐
+Azure Resource Groups ─┤
+Azure Container Reg.  ─┤──> [Event Grid] ──> Azure Functions
+Azure Service Bus     ─┤                ──> Logic Apps
+Azure SignalR         ─┤                ──> Webhooks
+Custom Topics         ─┘                ──> Event Hubs
+```
+
+**Quand l'utiliser :**
+- ✅ Réagir aux changements d'état des ressources Azure
+- ✅ Déclencher des traitements sur upload de fichier (Blob → Function)
+- ✅ Notifications et webhooks
+- ✅ Architecture IoT avec MQTT
+- ✅ Fan-out léger d'événements vers plusieurs handlers
+
+**Quand ne PAS l'utiliser :**
+- ❌ Streaming haute volumétrie et continu → préférer Event Hubs
+- ❌ Messages business avec transactions → préférer Service Bus
+- ❌ Rétention des événements requise
+
+---
+
+### 🎯 Choisir le Bon Service
+
+| Critère | Event Hubs | Service Bus | Event Grid |
+|---------|-----------|-------------|------------|
+| **Type** | Streaming | Messaging | Routing |
+| **Throughput** | Millions/s | ~1M msgs/s | Tens of millions/day |
+| **Rétention** | 1–90 jours | 14 jours max | 24h |
+| **Delivery** | At-least-once, replayable | At-least-once / Exactly-once | At-least-once |
+| **Ordre** | Par partition | Par session (optionnel) | Non garanti |
+| **DLQ** | ❌ | ✅ | ✅ |
+| **Transactions** | ❌ | ✅ | ❌ |
+| **Protocol** | AMQP, Kafka, HTTPS | AMQP, HTTPS | HTTPS, MQTT |
+| **Sources Azure natives** | ❌ | ❌ | ✅ |
+| **Idéal pour** | IoT, logs, analytics | Commandes, workflows | Notifications, triggers |
+
+> **Règle pratique :** Event Hubs pour *ingérer* des volumes massifs, Service Bus pour *traiter* des messages métier fiables, Event Grid pour *réagir* aux événements d'infrastructure ou déclencher des workflows.
 
 ---
 
