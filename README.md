@@ -30,10 +30,8 @@ Le workshop est organisé en **7 modules progressifs** avec des labs pratiques :
 | **[1](docs/01-azure-event-services.md)** | Event Hubs vs Event Grid | 📖 Théorie |
 | **[2](docs/02-event-hubs.md)** | Azure Event Hubs - Fondamentaux | 💻 Lab |
 | **[3](docs/03-event-hubs-advanced.md)** | Azure Event Hubs - Avancé | 💻 Lab |
-| **[3b](docs/03b-event-hubs-deepdive.md)** | **Event Hubs Deep Dive Expert** 🚀 | 💻 Lab |
-| **[4](docs/04-event-grid.md)** | Azure Event Grid - Lightweight | 💻 Lab |
-| **[5](docs/05-streaming-patterns.md)** | Patterns de Streaming | 📖 Théorie |
-| **[6](docs/06-hands-on-lab.md)** | Lab Final - Monitoring Temps Réel | 💻 Lab |
+| **[4](docs/04-event-grid.md)** | Azure Event Grid | 💻 Lab |
+| **[5](docs/06-hands-on-lab.md)** | Lab Final - Pipeline Complet | 💻 Lab |
 | **[7](docs/07-foundry-event-driven.md)** | **Foundry Agents + Event-Driven** ⭐ **NOUVEAU** | 💻 Lab |
 
 **Focus** : 🎯 **80% Event Hubs** | 15% Concepts | 5% Event Grid
@@ -123,10 +121,8 @@ Avant de commencer, assurez-vous d'avoir :
 - **[Module 1 : Services Azure](docs/01-azure-event-services.md)** - Event Hubs vs Event Grid
 - **[Module 2 : Event Hubs Fondamentaux](docs/02-event-hubs.md)** - Streaming haute performance
 - **[Module 3 : Event Hubs Avancé](docs/03-event-hubs-advanced.md)** - Partitionnement, Kafka, Capture
-- **[Module 3b : Event Hubs Deep Dive Expert](docs/03b-event-hubs-deepdive.md)** 🚀 **NOUVEAU** - Performance Tuning, Schema Registry, Geo-DR
-- **[Module 4 : Event Grid](docs/04-event-grid.md)** - Routage serverless
-- **[Module 5 : Patterns](docs/05-streaming-patterns.md)** - Event Sourcing, Stream Processing, Lambda
-- **[Module 6 : Lab Final](docs/06-hands-on-lab.md)** - Pipeline de Monitoring Temps Réel
+- **[Module 4 : Event Grid](docs/04-event-grid.md)** - Routage depuis Cosmos DB
+- **[Module 5 : Lab Final](docs/06-hands-on-lab.md)** - Pipeline Complet
 - **[Module 7 : Foundry + Event-Driven](docs/07-foundry-event-driven.md)** ⭐ **NOUVEAU** - Agents IA Autonomes avec Microsoft Foundry
 - **[Ressources](docs/resources.md)** - Liens et références utiles
 

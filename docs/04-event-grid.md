@@ -1,551 +1,602 @@
-# Module 4 : Azure Event Grid - Serverless Event Routing
+# Module 4 : Azure Event Grid — Routage Réactif depuis Cosmos DB
 
 ## 🎯 Objectifs
 
 Dans ce module, vous allez :
-- Comprendre le modèle pub/sub serverless d'Event Grid
-- Comparer Event Grid vs Event Hubs (quand utiliser chaque service)
-- Réagir aux événements Azure natifs (Blob Storage)
-- Implémenter une Azure Function event-driven
-
-> 📘 **Note** : Ce module est un complément léger (10% du workshop) à Event Hubs (70%). Event Grid est parfait pour des **notifications d'événements discrets**, pas pour du streaming haute volumétrie.
+- Comprendre le rôle d'Event Grid dans l'architecture de référence
+- Maîtriser le modèle pub/sub serverless et ses différences avec Event Hubs
+- Publier des événements vers le topic custom déployé en module 02
+- Implémenter une Azure Function Java déclenchée par Event Grid
+- Configurer des filtres et des abonnements multiples
 
 ---
 
-## 📚 Qu'est-ce qu'Event Grid ?
+## 📍 Positionnement dans l'Architecture
 
-Azure Event Grid est un service de **routage d'événements serverless** basé sur le pattern **Publish-Subscribe** :
+Dans l'architecture de référence (module 01), Event Grid joue le rôle de **couche réactive** : il reçoit les notifications du **change feed Cosmos DB** et les route vers les handlers concernés, sans que les consommateurs du stream Event Hubs n'aient à s'en préoccuper.
 
 ```mermaid
-graph LR
-    subgraph "Event Sources"
-        BS[Blob Storage]
-        KV[Key Vault]
-        RG[Resource Groups]
-        CT[Custom Apps]
-    end
-    
-    subgraph "Event Grid"
-        EG[Event Router<br/>Intelligent Filtering]
-    end
-    
-    subgraph "Event Handlers"
-        FN[Azure Functions]
-        WH[Webhooks]
-        LA[Logic Apps]
-    end
-    
-    BS -->|BlobCreated| EG
-    KV -->|CertificateExpiring| EG
-    RG -->|ResourceWriteSuccess| EG
-    CT -->|Custom Events| EG
-    
-    EG -->|Filter: images/*| FN
-    EG -->|Filter: *.pdf| WH
-    EG -->|All events| LA
-    
+flowchart TD
+    EH["🚀 Event Hubs"]
+    SA["🔧 Stream Analytics\nagrégation"]
+    DB["🗄️ Cosmos DB\nagrégats"]
+    EG["🔀 Event Grid\n$EG_TOPIC"]
+    H1["⚡ Azure Function\nnotification"]
+    H2["🌐 Webhook\nsystème tiers"]
+
+    EH --> SA
+    SA --> DB
+    DB -- "change feed" --> EG
+    EG -->|"sub: toutes alertes"| H1
+    EG -->|"sub: système externe"| H2
+
+    style EH fill:#0078d4,color:#fff
+    style DB fill:#1e4d78,color:#fff
     style EG fill:#7FBA00,color:#fff
+    style SA fill:#ff8c00,color:#fff
 ```
 
-### Caractéristiques Clés
-
-| Caractéristique | Détails |
-|-----------------|---------|
-| ⚡ **Pay-per-event** | $0.60 par million d'opérations |
-| 🔌 **100+ sources natives** | Blob, Key Vault, IoT Hub, Resource Groups... |
-| 🎯 **Filtrage intelligent** | Par type, subject, data properties |
-| 📦 **Pas de provisioning** | Serverless, scale automatique |
-| ⏱️ **Rétention** | 24 heures maximum |
-| 🚀 **Latence** | < 1 seconde (P99) |
-| 🔄 **Retry** | Built-in avec exponential backoff |
+**Ce que fait Event Grid ici** :
+- Cosmos DB déclenche un événement à chaque écriture (change feed)
+- Le topic custom (`$EG_TOPIC`) reçoit cet événement
+- Chaque abonnement filtre et route vers le handler approprié
+- Les handlers sont **découplés** — ils ne savent pas d'où vient l'événement
 
 ---
 
-## 🆚 Event Grid vs Event Hubs : Choisir le Bon Service
+## 🆚 Event Grid vs Event Hubs
 
 | Critère | Event Grid | Event Hubs |
 |---------|------------|------------|
-| **Pattern** | Pub/Sub (Push) | Streaming (Pull) |
-| **Use Case** | Notifications d'événements discrets | Streaming continu haute volumétrie |
+| **Pattern** | Pub/Sub — push | Streaming — pull |
+| **Usage** | Notifications d'événements discrets | Flux continus haute volumétrie |
 | **Volumétrie** | Des milliers/sec | Des millions/sec |
-| **Rétention** | 24 heures max | 1-90 jours |
-| **Prix** | $0.60/million events | Throughput Units ($22/mois/TU) |
-| **Latence** | < 1s | Quelques secondes |
-| **Consumer** | Push (webhook, function) | Pull (consumer groups) |
+| **Rétention** | 24 heures max | 1–90 jours |
 | **Ordre** | ❌ Non garanti | ✅ Garanti par partition |
-| **Exemple** | Blob créé, certificate expirant | Télémétrie IoT, logs applicatifs |
+| **Retry** | Built-in 24h, backoff exponentiel | À la charge du consommateur |
+| **Prix** | $0.60 / million d'opérations | Throughput Units (~$22/mois/TU) |
+| **Modèle** | Push vers le handler | Handler pull sur sa partition |
 
-### Quand utiliser Event Grid ?
-
-✅ **OUI** pour :
-- Réagir à des événements Azure (Blob uploaded, VM created, Key Vault certificate expiring)
-- Notifications légères (< 1000 events/sec)
-- Intégration serverless simple
-- Budget limité
-
-❌ **NON** pour :
-- Streaming continu haute volumétrie (utilisez Event Hubs)
-- Ordre garanti requis (utilisez Event Hubs avec partition key)
-- Analytics temps réel (utilisez Event Hubs + Stream Analytics)
-- Rétention > 24h (utilisez Event Hubs)
+> Dans l'architecture de référence, ils sont **complémentaires** : Event Hubs gère le stream brut, Event Grid gère les notifications en aval après agrégation.
 
 ---
 
-## 🔄 Format d'un Événement Event Grid
-
-Event Grid utilise le standard **CloudEvents** :
+## 📐 Format d'un Événement Event Grid
 
 ```json
 {
-  "specversion": "1.0",
-  "type": "Microsoft.Storage.BlobCreated",
-  "source": "/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Storage/storageAccounts/mystorageaccount",
-  "id": "831e1650-001e-001b-66ab-eeb76e069631",
-  "time": "2024-01-15T10:30:00.0000000Z",
-  "subject": "/blobServices/default/containers/uploads/blobs/photo.jpg",
+  "id":          "a1b2c3d4-...",
+  "eventType":   "EDA.Aggregate.Created",
+  "subject":     "aggregates/OrderPlaced/order-001",
+  "eventTime":   "2026-04-25T14:32:00Z",
+  "dataVersion": "1.0",
   "data": {
-    "api": "PutBlob",
-    "clientRequestId": "6d79dbfb-0e37-4fc4-981f-442c9ca65760",
-    "requestId": "831e1650-001e-001b-66ab-eeb76e000000",
-    "contentType": "image/jpeg",
-    "contentLength": 524288,
-    "blobType": "BlockBlob",
-    "url": "https://mystorageaccount.blob.core.windows.net/uploads/photo.jpg"
+    "type":       "OrderPlaced",
+    "entityId":   "order-001",
+    "eventCount": 12,
+    "windowEnd":  "2026-04-25T14:32:00Z"
   }
 }
 ```
 
----
-
-## 🛠️ Lab Pratique : Traiter Automatiquement les Fichiers Uploadés
-
-### Scénario
-
-Votre application permet aux utilisateurs d'uploader des fichiers dans Blob Storage. Vous voulez **automatiquement** :
-- Détecter quand un fichier est uploadé
-- Valider le type de fichier (images uniquement)
-- Logger les métadonnées
-- (Optionnel) Générer des thumbnails
-
-**Architecture :**
-
-```
-User uploads → Blob Storage → Event Grid → Azure Function
-                                              ├─> Validate
-                                              ├─> Log metadata
-                                              └─> Process image
-```
+| Champ | Rôle |
+|-------|------|
+| `eventType` | Clé de filtrage principale dans les abonnements |
+| `subject` | Chemin hiérarchique — filtrage par préfixe ou suffixe |
+| `data` | Payload libre — filtrage par propriété possible |
+| `id` | Idempotence — Event Grid peut livrer deux fois |
 
 ---
 
-### Étape 1 : Créer l'Infrastructure (10 min)
+## 🔑 Variables d'environnement
+
+Ce module utilise le topic Event Grid déployé dans le **module 02**. Récupérez les variables :
 
 ```bash
-#!/bin/bash
+# Topic custom créé dans le module 02
+export EG_TOPIC_NAME="egt-workshop-$SUFFIX"
 
-# Configuration
-RESOURCE_GROUP="rg-eventgrid-workshop"
-LOCATION="francecentral"
-PROJECT_NAME="eventgrid$(openssl rand -hex 3)"
+export EG_ENDPOINT=$(az eventgrid topic show \
+  --name $EG_TOPIC_NAME \
+  --resource-group $RG \
+  --query endpoint \
+  --output tsv)
 
-echo "🚀 Création de l'infrastructure Event Grid"
+export EG_KEY=$(az eventgrid topic key list \
+  --name $EG_TOPIC_NAME \
+  --resource-group $RG \
+  --query key1 \
+  --output tsv)
 
-# Resource group
-az group create --name $RESOURCE_GROUP --location $LOCATION
-
-# 1. Storage Account
-STORAGE_ACCOUNT="${PROJECT_NAME}storage"
-az storage account create \
-  --name $STORAGE_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --location $LOCATION \
-  --sku Standard_LRS \
-  --kind StorageV2
-
-# Créer un container pour les uploads
-az storage container create \
-  --name uploads \
-  --account-name $STORAGE_ACCOUNT \
-  --public-access off
-
-# 2. Function App
-FUNCTION_APP="${PROJECT_NAME}-functions"
-az functionapp create \
-  --name $FUNCTION_APP \
-  --resource-group $RESOURCE_GROUP \
-  --storage-account $STORAGE_ACCOUNT \
-  --consumption-plan-location $LOCATION \
-  --runtime java \
-  --runtime-version 17 \
-  --functions-version 4
-
-echo "✅ Infrastructure créée"
-echo "   Storage Account: $STORAGE_ACCOUNT"
-echo "   Function App: $FUNCTION_APP"
-
-# Sauvegarder les variables
-cat > .env << EOF
-RESOURCE_GROUP=$RESOURCE_GROUP
-STORAGE_ACCOUNT=$STORAGE_ACCOUNT
-FUNCTION_APP=$FUNCTION_APP
-EOF
+echo "✅ EG_ENDPOINT : $EG_ENDPOINT"
+echo "✅ EG_KEY      : ${EG_KEY:0:8}..."
 ```
 
 ---
 
-### Étape 2 : Créer l'Azure Function en Java (5 min)
+## ① Abonnements et Filtres
 
-```bash
-# Créer le projet Functions Java localement
-mvn archetype:generate \
-  -DarchetypeGroupId=com.microsoft.azure \
-  -DarchetypeArtifactId=azure-functions-archetype \
-  -DgroupId=com.example.eventgrid \
-  -DartifactId=blob-eventgrid-handler \
-  -DarchetypeVersion=1.51 \
-  -DinteractiveMode=false
+Le topic existe déjà (module 02). On ajoute maintenant des abonnements **spécialisés** par type d'événement.
 
-cd blob-eventgrid-handler
+### Vue des abonnements cibles
+
+```mermaid
+graph LR
+    T["$EG_TOPIC\necht-workshop-xxx"]
+
+    T -->|"eventType = EDA.Aggregate.*"| S1["sub-all-aggregates\n→ Function logging"]
+    T -->|"eventType = EDA.Alert.*"| S2["sub-alerts\n→ Function notification"]
+    T -->|"tous"| S3["sub-external\n→ Webhook"]
+
+    style T fill:#7FBA00,color:#fff
 ```
 
-**Fichier : `pom.xml` - Ajouter les dépendances :**
+### Créer un abonnement — Function Azure
+
+```bash
+# Récupérer l'ID de la Function App déployée en module 02
+FUNC_ID=$(az functionapp function show \
+  --name $FUNC_APP \
+  --resource-group $RG \
+  --function-name EventGridHandler \
+  --query id \
+  --output tsv)
+
+# Abonnement : tous les agrégats → Function de logging
+az eventgrid event-subscription create \
+  --name "sub-all-aggregates" \
+  --source-resource-id $(az eventgrid topic show \
+    --name $EG_TOPIC_NAME \
+    --resource-group $RG \
+    --query id --output tsv) \
+  --endpoint-type azurefunction \
+  --endpoint $FUNC_ID \
+  --included-event-types "EDA.Aggregate.Created"
+
+echo "✅ Abonnement créé : sub-all-aggregates → Function"
+```
+
+### Créer un abonnement — Webhook (test)
+
+```bash
+# Endpoint de test (remplacez par votre URL webhook.site)
+WEBHOOK_URL="https://webhook.site/votre-id-unique"
+
+az eventgrid event-subscription create \
+  --name "sub-external" \
+  --source-resource-id $(az eventgrid topic show \
+    --name $EG_TOPIC_NAME \
+    --resource-group $RG \
+    --query id --output tsv) \
+  --endpoint-type webhook \
+  --endpoint $WEBHOOK_URL \
+  --included-event-types "EDA.Alert.PaymentFailed"
+
+echo "✅ Abonnement créé : sub-external → Webhook (alertes paiement)"
+```
+
+### Filtres avancés
+
+```bash
+# Filtrer par préfixe de subject
+az eventgrid event-subscription create \
+  --name "sub-orders-only" \
+  --source-resource-id $(az eventgrid topic show \
+    --name $EG_TOPIC_NAME \
+    --resource-group $RG \
+    --query id --output tsv) \
+  --endpoint-type webhook \
+  --endpoint $WEBHOOK_URL \
+  --subject-begins-with "aggregates/OrderPlaced/" \
+  --included-event-types "EDA.Aggregate.Created"
+
+echo "✅ Filtre subject : OrderPlaced uniquement"
+```
+
+---
+
+## ② Publier vers le Topic depuis Java
+
+### Dépendances Maven
 
 ```xml
 <dependencies>
-    <!-- Azure Functions Java -->
-    <dependency>
-        <groupId>com.microsoft.azure.functions</groupId>
-        <artifactId>azure-functions-java-library</artifactId>
-        <version>3.0.0</version>
-    </dependency>
-    
-    <!-- JSON -->
-    <dependency>
-        <groupId>com.google.code.gson</groupId>
-        <artifactId>gson</artifactId>
-        <version>2.10.1</version>
-    </dependency>
+  <!-- SDK Event Grid -->
+  <dependency>
+    <groupId>com.azure</groupId>
+    <artifactId>azure-messaging-eventgrid</artifactId>
+    <version>4.21.0</version>
+  </dependency>
+
+  <!-- Jackson pour JSON -->
+  <dependency>
+    <groupId>com.fasterxml.jackson.core</groupId>
+    <artifactId>jackson-databind</artifactId>
+    <version>2.17.0</version>
+  </dependency>
 </dependencies>
 ```
 
-**Fichier : `src/main/java/com/example/eventgrid/BlobUploadHandler.java`**
+### Publier un événement depuis le change feed Cosmos DB
+
+Dans l'architecture, c'est la **Function connectée au change feed** qui publie dans Event Grid. Voici son implémentation :
 
 ```java
-package com.example.eventgrid;
+package com.example.eda;
 
-import com.microsoft.azure.functions.*;
-import com.microsoft.azure.functions.annotation.*;
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import java.util.Arrays;
-import java.util.logging.Logger;
+import com.azure.core.credential.AzureKeyCredential;
+import com.azure.messaging.eventgrid.*;
+import com.azure.messaging.eventgrid.models.EventGridEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
-public class BlobUploadHandler {
-    
-    private static final Gson gson = new Gson();
-    private static final long MAX_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
-    private static final String[] VALID_IMAGE_TYPES = {
-        "image/jpeg", "image/png", "image/gif", "image/webp"
-    };
-    
-    @FunctionName("BlobUploadHandler")
-    public void run(
-        @EventGridTrigger(name = "event") String eventGridEvent,
-        final ExecutionContext context
-    ) {
-        Logger logger = context.getLogger();
-        
-        logger.info("📨 Event Grid notification reçue");
-        
-        // Parser l'événement Event Grid
-        JsonObject event = gson.fromJson(eventGridEvent, JsonObject.class);
-        
-        String eventType = event.get("eventType").getAsString();
-        String subject = event.get("subject").getAsString();
-        JsonObject data = event.getAsJsonObject("data");
-        
-        logger.info("   Type: " + eventType);
-        logger.info("   Subject: " + subject);
-        
-        if (data == null) {
-            logger.warning("⚠️  Données invalides");
-            return;
-        }
-        
-        // Extraire les informations du blob
-        String url = data.get("url").getAsString();
-        String contentType = data.has("contentType") 
-            ? data.get("contentType").getAsString() 
-            : "";
-        long contentLength = data.get("contentLength").getAsLong();
-        
-        logger.info("📁 Fichier détecté: " + url);
-        logger.info("   Content-Type: " + contentType);
-        logger.info(String.format("   Taille: %,d bytes", contentLength));
-        
-        // Validation : seulement les images
-        if (!isValidImageType(contentType)) {
-            logger.warning("❌ Type non supporté: " + contentType);
-            return;
-        }
-        
-        // Validation : taille max 10MB
-        if (contentLength > MAX_SIZE_BYTES) {
-            logger.warning(String.format(
-                "❌ Fichier trop volumineux: %,d bytes (max %,d)", 
-                contentLength, MAX_SIZE_BYTES
-            ));
-            return;
-        }
-        
-        logger.info("✅ Fichier valide, traitement...");
-        
-        // TODO: Implémenter le traitement réel
-        // - Télécharger le blob avec BlobClient
-        // - Générer un thumbnail avec ImageIO
-        // - Extraire les métadonnées EXIF avec metadata-extractor
-        // - Sauvegarder les résultats dans Cosmos DB
-        
-        try {
-            Thread.sleep(500); // Simuler le traitement
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        
-        logger.info("🎉 Traitement terminé avec succès");
+import java.time.OffsetDateTime;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+public class CosmosChangeFeedPublisher {
+
+    private static final String EG_ENDPOINT = System.getenv("EG_ENDPOINT");
+    private static final String EG_KEY      = System.getenv("EG_KEY");
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final EventGridPublisherClient<EventGridEvent> client;
+
+    public CosmosChangeFeedPublisher() {
+        this.client = new EventGridPublisherClientBuilder()
+            .endpoint(EG_ENDPOINT)
+            .credential(new AzureKeyCredential(EG_KEY))
+            .buildEventGridEventPublisherClient();
     }
-    
-    private boolean isValidImageType(String contentType) {
-        if (contentType == null || contentType.isEmpty()) {
-            return false;
+
+    /**
+     * Appelé par la Function Cosmos DB change feed trigger.
+     * aggregate = document écrit par Stream Analytics dans Cosmos DB.
+     */
+    public void publishAggregate(Map<String, Object> aggregate) throws Exception {
+
+        String entityId  = (String) aggregate.get("entityId");
+        String eventType = (String) aggregate.get("type");
+        int count        = ((Number) aggregate.get("eventCount")).intValue();
+
+        // Construire le payload Event Grid
+        Map<String, Object> data = Map.of(
+            "type",       eventType,
+            "entityId",   entityId,
+            "eventCount", count,
+            "windowEnd",  aggregate.get("windowEnd")
+        );
+
+        EventGridEvent event = new EventGridEvent(
+            "aggregates/" + eventType + "/" + entityId,  // subject
+            "EDA.Aggregate.Created",                      // eventType
+            BinaryData.fromObject(data),                  // data
+            "1.0"                                         // dataVersion
+        );
+        event.setId(UUID.randomUUID().toString());
+        event.setEventTime(OffsetDateTime.now());
+
+        client.sendEvents(List.of(event));
+
+        System.out.printf("📤 Publié → EventGrid : %s / %s (count=%d)%n",
+            eventType, entityId, count);
+    }
+
+    /**
+     * Publier une alerte (ex : PaymentFailed détecté dans le stream).
+     */
+    public void publishAlert(String alertType, String entityId, String reason) {
+
+        Map<String, Object> data = Map.of(
+            "alertType", alertType,
+            "entityId",  entityId,
+            "reason",    reason,
+            "timestamp", OffsetDateTime.now().toString()
+        );
+
+        EventGridEvent event = new EventGridEvent(
+            "alerts/" + alertType + "/" + entityId,
+            "EDA.Alert." + alertType,
+            BinaryData.fromObject(data),
+            "1.0"
+        );
+
+        client.sendEvents(List.of(event));
+        System.out.printf("🚨 Alerte publiée → EventGrid : %s / %s%n", alertType, entityId);
+    }
+
+    // ─── Test local ────────────────────────────────────────────────
+
+    public static void main(String[] args) throws Exception {
+        CosmosChangeFeedPublisher publisher = new CosmosChangeFeedPublisher();
+
+        // Simuler un agrégat reçu depuis Cosmos DB
+        publisher.publishAggregate(Map.of(
+            "type",       "OrderPlaced",
+            "entityId",   "order-001",
+            "eventCount", 5,
+            "windowEnd",  "2026-04-25T14:32:00Z"
+        ));
+
+        // Simuler une alerte
+        publisher.publishAlert("PaymentFailed", "order-042", "Card declined");
+    }
+}
+```
+
+### Publier en batch (plusieurs agrégats)
+
+```java
+import java.util.ArrayList;
+import java.util.List;
+
+public class BatchPublisher {
+
+    public void publishBatch(List<Map<String, Object>> aggregates) {
+        List<EventGridEvent> events = new ArrayList<>();
+
+        for (Map<String, Object> aggregate : aggregates) {
+            String entityId  = (String) aggregate.get("entityId");
+            String eventType = (String) aggregate.get("type");
+
+            EventGridEvent event = new EventGridEvent(
+                "aggregates/" + eventType + "/" + entityId,
+                "EDA.Aggregate.Created",
+                BinaryData.fromObject(aggregate),
+                "1.0"
+            );
+            events.add(event);
         }
-        
-        return Arrays.stream(VALID_IMAGE_TYPES)
-            .anyMatch(type -> type.equalsIgnoreCase(contentType));
+
+        // Event Grid accepte jusqu'à 1 MB par batch
+        client.sendEvents(events);
+        System.out.printf("📤 Batch publié : %d événements%n", events.size());
     }
 }
 ```
 
 ---
 
-### Étape 3 : Déployer la Function (2 min)
+## ③ Azure Function Java déclenchée par Event Grid
 
-```bash
-# Charger les variables
-source .env
+Cette Function reçoit les événements routés par Event Grid et les traite — logging, notification, appel externe.
 
-# Compiler et packager le projet Maven
-mvn clean package
+### Trigger Event Grid dans une Azure Function Java
 
-# Déployer avec Maven Azure Functions plugin
-mvn azure-functions:deploy -DappName=$FUNCTION_APP -DresourceGroup=$RESOURCE_GROUP
+```java
+package com.example.eda;
 
-echo "✅ Function déployée"
+import com.microsoft.azure.functions.*;
+import com.microsoft.azure.functions.annotation.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.util.Map;
+import java.util.logging.Logger;
+
+public class EventGridHandler {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @FunctionName("EventGridHandler")
+    public void run(
+        @EventGridTrigger(name = "event") String eventGridEvent,
+        final ExecutionContext context
+    ) {
+        Logger log = context.getLogger();
+
+        try {
+            // Parser l'enveloppe Event Grid
+            Map<?, ?> envelope = MAPPER.readValue(eventGridEvent, Map.class);
+
+            String eventType = (String) envelope.get("eventType");
+            String subject   = (String) envelope.get("subject");
+            String eventId   = (String) envelope.get("id");
+            Map<?, ?> data   = (Map<?, ?>) envelope.get("data");
+
+            log.info(String.format("📨 Event Grid reçu [%s] : %s", eventType, subject));
+
+            // Router par type d'événement
+            switch (eventType) {
+                case "EDA.Aggregate.Created"   -> handleAggregate(data, log);
+                case "EDA.Alert.PaymentFailed" -> handlePaymentAlert(data, log);
+                default -> log.info("ℹ️  Type non géré : " + eventType);
+            }
+
+            log.info("✅ Événement traité : " + eventId);
+
+        } catch (Exception ex) {
+            // Event Grid retentera si la Function lève une exception
+            // → ne pas avaler les exceptions critiques
+            log.severe("❌ Erreur traitement : " + ex.getMessage());
+            throw new RuntimeException(ex);
+        }
+    }
+
+    private void handleAggregate(Map<?, ?> data, Logger log) {
+        String entityId  = (String) data.get("entityId");
+        String type      = (String) data.get("type");
+        int    count     = ((Number) data.get("eventCount")).intValue();
+
+        log.info(String.format(
+            "📊 Agrégat : %s / %s — %d événements dans la fenêtre",
+            type, entityId, count
+        ));
+
+        // Ex : mise à jour d'un dashboard, envoi d'une notification push
+    }
+
+    private void handlePaymentAlert(Map<?, ?> data, Logger log) {
+        String entityId = (String) data.get("entityId");
+        String reason   = (String) data.get("reason");
+
+        log.warning(String.format("🚨 Alerte paiement : %s — %s", entityId, reason));
+
+        // Ex : appel à un service de notification (email, SMS, Teams)
+    }
+}
 ```
 
-> 💡 **Alternative** : Ajoutez la configuration dans `pom.xml` :
-> ```xml
-> <plugin>
->     <groupId>com.microsoft.azure</groupId>
->     <artifactId>azure-functions-maven-plugin</artifactId>
->     <version>1.29.0</version>
->     <configuration>
->         <appName>${functionAppName}</appName>
->         <resourceGroup>${resourceGroup}</resourceGroup>
->         <region>${LOCATION}</region>
->     </configuration>
-> </plugin>
-> ```
+### Idempotence — gérer les livraisons en double
+
+Event Grid peut livrer le même événement **deux fois** en cas de retry. La Function doit être idempotente :
+
+```java
+// Anti-pattern : opération non idempotente
+private void handleAggregate(Map<?, ?> data, Logger log) {
+    db.insert(data);  // ❌ Erreur si l'eventId existe déjà
+}
+
+// Pattern correct : upsert sur l'ID de l'événement
+private void handleAggregate(Map<?, ?> data, String eventId, Logger log) {
+    if (db.exists(eventId)) {
+        log.info("Événement déjà traité, ignoré : " + eventId);
+        return;  // ✅ Idempotent
+    }
+    db.upsert(eventId, data);
+}
+```
 
 ---
 
-### Étape 4 : Créer l'Event Subscription (3 min)
+## ④ Tester le Pipeline de Bout en Bout
 
-Lier le Storage Account à la Function via Event Grid :
+### Publier un événement de test via CLI
 
 ```bash
-# Obtenir les IDs
-STORAGE_ID=$(az storage account show \
+# Publier directement dans le topic (test sans Cosmos DB)
+az eventgrid event publish \
+  --topic-name $EG_TOPIC_NAME \
+  --resource-group $RG \
+  --events '[{
+    "id":          "test-001",
+    "eventType":   "EDA.Aggregate.Created",
+    "subject":     "aggregates/OrderPlaced/order-001",
+    "eventTime":   "2026-04-25T14:32:00Z",
+    "dataVersion": "1.0",
+    "data": {
+      "type":       "OrderPlaced",
+      "entityId":   "order-001",
+      "eventCount": 5,
+      "windowEnd":  "2026-04-25T14:32:00Z"
+    }
+  }]'
+
+echo "✅ Événement publié"
+```
+
+### Vérifier les livraisons
+
+```bash
+# Métriques du topic : événements publiés / livrés / échoués
+az monitor metrics list \
+  --resource $(az eventgrid topic show \
+    --name $EG_TOPIC_NAME \
+    --resource-group $RG \
+    --query id --output tsv) \
+  --metric "PublishSuccessCount,DeliverySuccessCount,DeliveryFailCount" \
+  --interval PT5M \
+  --output table
+```
+
+### Logs de la Function
+
+```bash
+# Suivre les logs en temps réel
+func azure functionapp logstream $FUNC_APP
+```
+
+---
+
+## ⑤ Retry et Dead-lettering
+
+### Comportement de retry par défaut
+
+```
+Livraison échoue → Event Grid attend et réessaie :
+  10s → 30s → 1min → 5min → 10min → 30min → 1h → ... → 24h
+
+Après 24h sans succès → événement abandonné
+```
+
+### Configurer le dead-lettering
+
+```bash
+# Créer un container pour les événements morts
+az storage container create \
+  --name eg-dead-letters \
+  --account-name $STORAGE_ACCOUNT
+
+DL_STORAGE_ID=$(az storage account show \
   --name $STORAGE_ACCOUNT \
-  --resource-group $RESOURCE_GROUP \
-  --query id -o tsv)
+  --resource-group $RG \
+  --query id --output tsv)
 
-FUNCTION_ID=$(az functionapp function show \
-  --name $FUNCTION_APP \
-  --resource-group $RESOURCE_GROUP \
-  --function-name BlobUploadHandler \
-  --query id -o tsv)
+# Mettre à jour la subscription avec dead-letter
+az eventgrid event-subscription update \
+  --name "sub-all-aggregates" \
+  --source-resource-id $(az eventgrid topic show \
+    --name $EG_TOPIC_NAME \
+    --resource-group $RG \
+    --query id --output tsv) \
+  --deadletter-endpoint "${DL_STORAGE_ID}/blobServices/default/containers/eg-dead-letters"
 
-# Créer la subscription Event Grid
-az eventgrid event-subscription create \
-  --name sub-blob-uploads \
-  --source-resource-id $STORAGE_ID \
-  --endpoint-type azurefunction \
-  --endpoint $FUNCTION_ID \
-  --included-event-types Microsoft.Storage.BlobCreated \
-  --subject-begins-with /blobServices/default/containers/uploads/
+echo "✅ Dead-lettering configuré → $STORAGE_ACCOUNT/eg-dead-letters"
+```
 
-echo "✅ Event subscription créée"
-echo "   Source: Blob Storage ($STORAGE_ACCOUNT)"
-echo "   Handler: Azure Function (BlobUploadHandler)"
-echo "   Filter: Container 'uploads' seulement"
+> Les événements en dead-letter sont des fichiers JSON dans le container. Inspectez-les pour diagnostiquer les échecs de livraison.
+
+---
+
+## ⑥ Monitoring
+
+### Métriques clés à surveiller
+
+| Métrique | Signal | Seuil d'alerte |
+|----------|--------|----------------|
+| `PublishSuccessCount` | Événements acceptés par le topic | Chute → problème producteur |
+| `DeliverySuccessCount` | Événements livrés aux handlers | Doit suivre `PublishSuccessCount` |
+| `DeliveryFailCount` | Livraisons échouées | > 0 → handler en erreur |
+| `DeadLetteredCount` | Événements en dead-letter | > 0 → investigation requise |
+| `MatchedEventCount` | Événements filtrés par abonnement | Vérifier les filtres |
+
+### Requête KQL
+
+```kql
+// Taux de succès de livraison sur 1h
+AzureMetrics
+| where ResourceProvider == "MICROSOFT.EVENTGRID"
+| where MetricName in ("PublishSuccessCount", "DeliverySuccessCount", "DeliveryFailCount")
+| summarize Total = sum(Total) by MetricName, bin(TimeGenerated, 5m)
+| render timechart
+
+// Événements dead-letterés
+AzureMetrics
+| where MetricName == "DeadLetteredCount"
+| where Total > 0
+| order by TimeGenerated desc
 ```
 
 ---
 
-### Étape 5 : Tester (5 min)
+## ⑦ Best Practices
 
-#### 1. Uploader une image valide
-
-```bash
-# Créer une image de test
-echo "Test image content" > test-image.jpg
-
-az storage blob upload \
-  --account-name $STORAGE_ACCOUNT \
-  --container-name uploads \
-  --name test-image.jpg \
-  --file test-image.jpg \
-  --content-type "image/jpeg" \
-  --overwrite
-
-echo "✅ Image uploadée"
-```
-
-#### 2. Uploader un fichier non-image (devrait être rejeté)
-
-```bash
-echo "Not an image" > test.txt
-
-az storage blob upload \
-  --account-name $STORAGE_ACCOUNT \
-  --container-name uploads \
-  --name test.txt \
-  --file test.txt \
-  --content-type "text/plain" \
-  --overwrite
-
-echo "✅ Fichier texte uploadé"
-```
-
-#### 3. Vérifier les logs de la Function
-
-```bash
-# Ouvrir les logs en temps réel
-func azure functionapp logstream $FUNCTION_APP --browser
-
-# Ou dans le portail Azure :
-# Function App → Functions → BlobUploadHandler → Monitor → Logs
-```
-
-**Logs attendus :**
-
-```
-📨 Event Grid notification reçue
-   Type: Microsoft.Storage.BlobCreated
-   Subject: /blobServices/default/containers/uploads/blobs/test-image.jpg
-📁 Fichier détecté: https://....blob.core.windows.net/uploads/test-image.jpg
-   Content-Type: image/jpeg
-   Taille: 19 bytes
-✅ Fichier valide, traitement...
-🎉 Traitement terminé avec succès
-
-📨 Event Grid notification reçue
-   Type: Microsoft.Storage.BlobCreated
-   Subject: /blobServices/default/containers/uploads/blobs/test.txt
-📁 Fichier détecté: https://....blob.core.windows.net/uploads/test.txt
-   Content-Type: text/plain
-   Taille: 14 bytes
-❌ Type non supporté: text/plain
-```
-
----
-
-## ✅ Quiz
-
-### Question 1
-**Quelle est la différence principale entre Event Grid et Event Hubs ?**
-
-<details>
-<summary>Réponse</summary>
-
-**Event Grid** = Pub/Sub pour **événements discrets** (push)
-- Notifications légères (blob créé, certificate expirant)
-- 24h rétention max
-- Pay-per-event
-
-**Event Hubs** = Streaming pour **flux continus** (pull)
-- Télémétrie haute volumétrie (millions events/sec)
-- 1-90 jours rétention
-- Ordre garanti par partition
-</details>
-
-### Question 2
-**Comment Event Grid garantit-il la livraison d'un événement ?**
-
-<details>
-<summary>Réponse</summary>
-
-Event Grid utilise un **retry policy** avec exponential backoff :
-- Réessaie pendant **24 heures** maximum
-- Intervalles : 10s, 30s, 1min, 5min, 10min, 30min, 1h...
-- Après 24h, l'événement est abandonné (ou envoyé en dead letter si configuré)
-</details>
-
-### Question 3
-**Peut-on utiliser Event Grid pour un pipeline IoT à 10,000 events/sec ?**
-
-<details>
-<summary>Réponse</summary>
-
-**Non**, utilisez **Event Hubs** pour ce use case :
-- Event Grid supporte des milliers/sec, pas des dizaines de milliers
-- Pas d'ordre garanti dans Event Grid
-- Rétention 24h max (vs 90 jours Event Hubs)
-- Event Grid est fait pour des notifications, pas du streaming continu
-</details>
-
----
-
-## 🎯 Points Clés
-
-| Concept | Explication |
-|---------|-------------|
-| **Serverless** | Pas de provisioning, pay-per-event ($0.60/million) |
-| **Push model** | Event Grid pousse vers les handlers (vs pull Event Hubs) |
-| **Filtrage** | Par type, subject, data properties |
-| **Retry** | Built-in pendant 24h avec exponential backoff |
-| **Use Case** | Notifications d'événements discrets, pas streaming |
-| **Complémentarité** | Event Grid ≠ concurrent à Event Hubs, mais complémentaire |
-
----
-
-## 📚 Ressources
-
-- 📖 **[Event-Driven Architecture Style - Microsoft Learn](https://learn.microsoft.com/en-us/azure/architecture/guide/architecture-styles/event-driven)** ⭐ Guide complet
-- [Azure Event Grid Documentation](https://docs.microsoft.com/azure/event-grid/)
-- [Event Grid vs Event Hubs vs Service Bus](https://docs.microsoft.com/azure/event-grid/compare-messaging-services)
-- [CloudEvents Specification](https://cloudevents.io/)
-
----
-
-## 🧹 Nettoyage
-
-```bash
-# Supprimer toutes les ressources
-az group delete --name $RESOURCE_GROUP --yes --no-wait
-
-echo "✅ Ressources supprimées"
-```
+| ✅ À faire | ❌ À éviter |
+|------------|-------------|
+| Rendre les handlers idempotents | Supposer qu'un événement n'arrive qu'une fois |
+| Configurer le dead-lettering | Laisser les événements disparaître en silence |
+| Filtrer par `eventType` précis | Abonnement "all events" sans filtres |
+| Valider le `eventType` dans le handler | Se fier uniquement au format du payload |
+| Utiliser `subject` comme chemin hiérarchique | Subject plat sans structure |
+| Monitorer `DeliveryFailCount` | Ignorer les métriques de livraison |
 
 ---
 
 ## ➡️ Prochaine Étape
 
-Maintenant que vous comprenez Event Grid pour des notifications légères, passons aux **patterns architecturaux streaming** !
+L'architecture est complète de bout en bout. Dans le module suivant, on passe au **lab final** : déploiement et validation du pipeline complet en situation réelle.
 
-**[Module 5 : Patterns de Streaming et Architecture Event-Driven →](./05-streaming-patterns.md)**
+**[Module 5 : Lab Final — Pipeline Complet →](./06-hands-on-lab.md)**
 
 ---
 
-[← Module précédent](./03-event-hubs-advanced.md) | [Retour au sommaire](./workshop.md) | [Module suivant →](./05-streaming-patterns.md)
+[← Module précédent](./03-event-hubs-advanced.md) | [Retour au sommaire](./workshop.md)

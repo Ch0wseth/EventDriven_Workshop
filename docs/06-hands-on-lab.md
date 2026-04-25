@@ -999,4 +999,4 @@ Vous êtes maintenant capable de concevoir et implémenter des systèmes event-d
 
 ---
 
-[← Module précédent](./05-event-architecture.md) | [Retour au sommaire](./workshop.md)
+[← Module précédent](./04-event-grid.md) | [Retour au sommaire](./workshop.md)

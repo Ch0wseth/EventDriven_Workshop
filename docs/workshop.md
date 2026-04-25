@@ -90,11 +90,7 @@ Découvrez le routage d'événements serverless avec Event Grid pour des intégr
 
 **Lab pratique :** Réagir aux événements Azure (Blob Storage) avec Azure Functions.
 
-### [Module 5 : Patterns d'Architecture Streaming](./05-streaming-patterns.md)
-
-Explorez les patterns architecturaux pour le streaming : Event Sourcing, CQRS, Lambda Architecture, et Stream Processing.
-
-### [Module 6 : Lab Final - Pipeline de Monitoring Temps Réel](./06-hands-on-lab.md)
+### [Module 5 : Lab Final - Pipeline Complet](./06-hands-on-lab.md)
 
 Construisez un système complet de monitoring et observabilité avec Event Hubs, Stream Analytics, Event Grid et Application Insights.
 
